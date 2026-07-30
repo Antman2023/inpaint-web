@@ -2,16 +2,15 @@
 /* eslint-disable jsx-a11y/no-static-element-interactions */
 import { DownloadIcon, EyeIcon, ViewBoardsIcon } from '@heroicons/react/outline'
 import { useCallback, useEffect, useState, useRef, useMemo } from 'react'
-import { useWindowSize } from 'react-use'
 import inpaint from './adapters/inpainting'
 import superResolution from './adapters/superResolution'
 import Button from './components/Button'
 import Slider from './components/Slider'
-import { downloadImage, loadImage, useImage } from './utils'
+import { downloadImage, loadImage, useImage, useWindowSize } from './utils'
 import Progress from './components/Progress'
 import { modelExists, downloadModel } from './adapters/cache'
 import Modal from './components/Modal'
-import * as m from './paraglide/messages'
+import { message } from './i18n'
 
 interface EditorProps {
   file: File
@@ -39,7 +38,9 @@ function drawLines(
     ctx.lineWidth = line.size
     ctx.beginPath()
     ctx.moveTo(line.pts[0].x, line.pts[0].y)
-    line.pts.forEach(pt => ctx.lineTo(pt.x, pt.y))
+    line.pts.forEach(pt => {
+      ctx.lineTo(pt.x, pt.y)
+    })
     ctx.stroke()
   })
 }
@@ -74,6 +75,27 @@ export default function Editor(props: EditorProps) {
   const [downloadProgress, setDownloadProgress] = useState(0)
   const windowSize = useWindowSize()
 
+  const onloading = useCallback(() => {
+    setIsProcessingLoading(true)
+    setGenerateProgress(0)
+    const progressTimer = window.setInterval(() => {
+      setGenerateProgress(p => {
+        if (p < 90) return p + 10 * Math.random()
+        if (p >= 90 && p < 99) return p + 1 * Math.random()
+        // Do not hide the progress bar after 99%,cause sometimes long time progress
+        // window.setTimeout(() => setIsInpaintingLoading(false), 500)
+        return p
+      })
+    }, 1000)
+    return {
+      close: () => {
+        clearInterval(progressTimer)
+        setGenerateProgress(100)
+        setIsProcessingLoading(false)
+      },
+    }
+  }, [])
+
   const draw = useCallback(
     (index = -1) => {
       if (!context) {
@@ -84,15 +106,19 @@ export default function Editor(props: EditorProps) {
         renders[index === -1 ? renders.length - 1 : index] ?? original
       const { canvas } = context
 
-      const divWidth = canvasDiv.current!.offsetWidth
-      const divHeight = canvasDiv.current!.offsetHeight
+      const canvasContainer = canvasDiv.current
+      if (!canvasContainer) {
+        return
+      }
+      const divWidth = canvasContainer.offsetWidth
+      const divHeight = canvasContainer.offsetHeight
 
       // 计算宽高比
       const imgAspectRatio = currRender.width / currRender.height
       const divAspectRatio = divWidth / divHeight
 
-      let canvasWidth
-      let canvasHeight
+      let canvasWidth: number
+      let canvasHeight: number
 
       // 比较宽高比以决定如何缩放
       if (divAspectRatio > imgAspectRatio) {
@@ -139,10 +165,10 @@ export default function Editor(props: EditorProps) {
     if (!context?.canvas) {
       return
     }
-    if (isOriginalLoaded) {
+    if (isOriginalLoaded && windowSize.width > 0 && windowSize.height > 0) {
       draw()
     }
-  }, [context?.canvas, draw, original, isOriginalLoaded, windowSize])
+  }, [context?.canvas, draw, isOriginalLoaded, windowSize])
 
   // Handle mouse interactions
   useEffect(() => {
@@ -200,12 +226,11 @@ export default function Editor(props: EditorProps) {
         console.log('inpaint_processed', {
           duration: Date.now() - start,
         })
-      } catch (e: any) {
+      } catch (error) {
         console.log('inpaint_failed', {
-          error: e,
+          error,
         })
-        // eslint-disable-next-line
-        alert(e.message ? e.message : e.toString())
+        alert(error instanceof Error ? error.message : String(error))
       }
       if (historyListRef.current) {
         const { scrollWidth, clientWidth } = historyListRef.current
@@ -273,6 +298,8 @@ export default function Editor(props: EditorProps) {
     renders,
     showOriginal,
     hideBrushTimeout,
+    onloading,
+    scaledBrushSize,
   ])
 
   useEffect(() => {
@@ -282,8 +309,8 @@ export default function Editor(props: EditorProps) {
       ev.preventDefault()
       ev.stopPropagation()
       if (context?.canvas) {
-        const { width } = context?.canvas
-        const canvasRect = context?.canvas.getBoundingClientRect()
+        const { width } = context.canvas
+        const canvasRect = context.canvas.getBoundingClientRect()
         const separatorOffsetLeft = ev.pageX - canvasRect.left
         if (separatorOffsetLeft <= width && separatorOffsetLeft >= 0) {
           setSeparatorLeft(separatorOffsetLeft)
@@ -312,7 +339,7 @@ export default function Editor(props: EditorProps) {
       separator.removeEventListener('mousedown', separatorDown)
       window.removeEventListener('mouseup', separatorUp)
     }
-  }, [separator, context])
+  }, [separator, context, originalImg])
 
   function download() {
     const currRender = renders.at(-1) ?? original
@@ -408,7 +435,7 @@ export default function Editor(props: EditorProps) {
           </div>
         )
       }),
-    [renders, backTo]
+    [renders, backTo, draw]
   )
 
   const handleSliderStart = () => {
@@ -432,27 +459,6 @@ export default function Editor(props: EditorProps) {
       }, BRUSH_HIDE_ON_SLIDER_CHANGE_TIMEOUT)
     )
   }
-
-  const onloading = useCallback(() => {
-    setIsProcessingLoading(true)
-    setGenerateProgress(0)
-    const progressTimer = window.setInterval(() => {
-      setGenerateProgress(p => {
-        if (p < 90) return p + 10 * Math.random()
-        if (p >= 90 && p < 99) return p + 1 * Math.random()
-        // Do not hide the progress bar after 99%,cause sometimes long time progress
-        // window.setTimeout(() => setIsInpaintingLoading(false), 500)
-        return p
-      })
-    }, 1000)
-    return {
-      close: () => {
-        clearInterval(progressTimer)
-        setGenerateProgress(100)
-        setIsProcessingLoading(false)
-      },
-    }
-  }, [])
 
   const onSuperResolution = useCallback(async () => {
     if (!(await modelExists('superResolution'))) {
@@ -489,7 +495,7 @@ export default function Editor(props: EditorProps) {
     } finally {
       setIsProcessingLoading(false)
     }
-  }, [file, lines, original.naturalHeight, original.naturalWidth, renders])
+  }, [file, lines, renders])
 
   return (
     <div
@@ -509,7 +515,7 @@ export default function Editor(props: EditorProps) {
           'mt-4 border p-3 rounded',
           'flex items-left w-full max-w-4xl',
           'space-y-0 flex-row space-x-5',
-          'scrollbar-thin scrollbar-thumb-black scrollbar-track-primary overflow-x-scroll',
+          'history-scrollbar overflow-x-scroll',
         ].join(' ')}
       >
         {History}
@@ -624,7 +630,7 @@ export default function Editor(props: EditorProps) {
       {!downloaded && (
         <Modal>
           <div className="text-xl space-y-5">
-            <p>{m.upscaleing_model_download_message()}</p>
+            <p>{message('upscaleing_model_download_message')}</p>
             <Progress percent={downloadProgress} />
           </div>
         </Modal>
@@ -655,6 +661,7 @@ export default function Editor(props: EditorProps) {
             onClick={undo}
             icon={
               <svg
+                aria-hidden="true"
                 className="w-6 h-6"
                 width="19"
                 height="9"
@@ -669,11 +676,11 @@ export default function Editor(props: EditorProps) {
               </svg>
             }
           >
-            {m.undo()}
+            {message('undo')}
           </Button>
         )}
         <Slider
-          label={m.bruch_size()}
+          label={message('bruch_size')}
           min={10}
           max={200}
           value={brushSize}
@@ -688,10 +695,10 @@ export default function Editor(props: EditorProps) {
             setTimeout(() => setSeparatorLeft(0), 300)
           }}
         >
-          {m.original()}
+          {message('original')}
         </Button>
         {!showOriginal && (
-          <Button onUp={onSuperResolution}>{m.upscale()}</Button>
+          <Button onUp={onSuperResolution}>{message('upscale')}</Button>
         )}
 
         <Button
@@ -699,7 +706,7 @@ export default function Editor(props: EditorProps) {
           icon={<DownloadIcon className="w-6 h-6" />}
           onClick={download}
         >
-          {m.download()}
+          {message('download')}
         </Button>
       </div>
     </div>

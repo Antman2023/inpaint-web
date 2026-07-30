@@ -2,29 +2,22 @@
 /* eslint-disable jsx-a11y/control-has-associated-label */
 import { ArrowLeftIcon, InformationCircleIcon } from '@heroicons/react/outline'
 import { useEffect, useRef, useState } from 'react'
-import { useClickAway } from 'react-use'
 import Button from './components/Button'
 import FileSelect from './components/FileSelect'
 import Modal from './components/Modal'
 import Editor from './Editor'
-import { resizeImageFile } from './utils'
+import { resizeImageFile, useClickAway } from './utils'
 import Progress from './components/Progress'
 import { downloadModel } from './adapters/cache'
-import * as m from './paraglide/messages'
-import {
-  languageTag,
-  onSetLanguageTag,
-  setLanguageTag,
-} from './paraglide/runtime'
+import { type LanguageTag, languageTag, message, setLanguageTag } from './i18n'
 
 function App() {
   const [file, setFile] = useState<File>()
-  const [stateLanguageTag, setStateLanguageTag] = useState<'en' | 'zh'>('zh')
-
-  onSetLanguageTag(() => setStateLanguageTag(languageTag()))
+  const [stateLanguageTag, setStateLanguageTag] =
+    useState<LanguageTag>(languageTag())
 
   const [showAbout, setShowAbout] = useState(false)
-  const modalRef = useRef(null)
+  const modalRef = useRef<HTMLDivElement>(null)
 
   const [downloadProgress, setDownloadProgress] = useState(100)
 
@@ -56,7 +49,7 @@ function App() {
         >
           <div className="md:w-[290px]">
             <span className="hidden sm:inline select-none">
-              {m.start_new()}
+              {message('start_new')}
             </span>
           </div>
         </Button>
@@ -67,14 +60,12 @@ function App() {
           <Button
             className="mr-5 flex"
             onClick={() => {
-              if (languageTag() === 'zh') {
-                setLanguageTag('en')
-              } else {
-                setLanguageTag('zh')
-              }
+              const nextLanguageTag = stateLanguageTag === 'zh' ? 'en' : 'zh'
+              setLanguageTag(nextLanguageTag)
+              setStateLanguageTag(nextLanguageTag)
             }}
           >
-            <p>{languageTag() === 'en' ? '切换到中文' : 'en'}</p>
+            <p>{stateLanguageTag === 'en' ? '切换到中文' : 'en'}</p>
           </Button>
           <Button
             className="w-38 flex sm:visible"
@@ -83,7 +74,7 @@ function App() {
               setShowAbout(true)
             }}
           >
-            <p>{m.feedback()}</p>
+            <p>{message('feedback')}</p>
           </Button>
         </div>
       </header>
@@ -97,44 +88,41 @@ function App() {
         {file ? (
           <Editor file={file} />
         ) : (
-          <>
-            <div className="flex h-full flex-1 flex-col items-center justify-center overflow-hidden">
-              <div className="h-72 sm:w-1/2 max-w-5xl">
-                <FileSelect
-                  onSelection={async f => {
-                    const { file: resizedFile } = await resizeImageFile(
-                      f,
-                      1024 * 4
-                    )
-                    setFile(resizedFile)
-                  }}
-                />
-              </div>
-              <div className="flex flex-col sm:flex-row pt-10 items-center justify-center cursor-pointer">
-                <span className="text-gray-500">{m.try_it_images()}</span>
-                <div className="flex space-x-2 sm:space-x-4 px-4">
-                  {['bag', 'dog', 'car', 'bird', 'jacket', 'shoe', 'paris'].map(
-                    image => (
-                      <div
-                        key={image}
-                        onClick={() => startWithDemoImage(image)}
-                        role="button"
-                        onKeyDown={() => startWithDemoImage(image)}
-                        tabIndex={-1}
-                      >
-                        <img
-                          className="rounded-md hover:opacity-75 w-auto h-25"
-                          src={`examples/${image}.jpeg`}
-                          alt={image}
-                          style={{ height: '100px' }}
-                        />
-                      </div>
-                    )
-                  )}
-                </div>
+          <div className="flex h-full flex-1 flex-col items-center justify-center overflow-hidden">
+            <div className="h-72 sm:w-1/2 max-w-5xl">
+              <FileSelect
+                onSelection={async f => {
+                  const { file: resizedFile } = await resizeImageFile(
+                    f,
+                    1024 * 4
+                  )
+                  setFile(resizedFile)
+                }}
+              />
+            </div>
+            <div className="flex flex-col sm:flex-row pt-10 items-center justify-center cursor-pointer">
+              <span className="text-gray-500">{message('try_it_images')}</span>
+              <div className="flex space-x-2 sm:space-x-4 px-4">
+                {['bag', 'dog', 'car', 'bird', 'jacket', 'shoe', 'paris'].map(
+                  image => (
+                    <button
+                      type="button"
+                      key={image}
+                      onClick={() => startWithDemoImage(image)}
+                      className="border-0 bg-transparent p-0"
+                    >
+                      <img
+                        className="rounded-md hover:opacity-75 w-auto h-25"
+                        src={`examples/${image}.jpeg`}
+                        alt={image}
+                        style={{ height: '100px' }}
+                      />
+                    </button>
+                  )
+                )}
               </div>
             </div>
-          </>
+          </div>
         )}
       </main>
 
@@ -173,7 +161,7 @@ function App() {
       {!(downloadProgress === 100) && (
         <Modal>
           <div className="text-xl space-y-5">
-            <p>{m.inpaint_model_download_message()}</p>
+            <p>{message('inpaint_model_download_message')}</p>
             <Progress percent={downloadProgress} />
           </div>
         </Modal>

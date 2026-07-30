@@ -1,12 +1,14 @@
 export default function MadeWidthBadge() {
   return (
     <svg
+      role="img"
       width="101"
       height="43"
       viewBox="0 0 101 43"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
+      <title>Made with Inpaint Web</title>
       <path
         fillRule="evenodd"
         clipRule="evenodd"

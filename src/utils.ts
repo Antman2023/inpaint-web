@@ -1,4 +1,45 @@
-import { useCallback, useEffect, useState } from 'react'
+import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
+
+export function useClickAway<T extends HTMLElement>(
+  ref: RefObject<T>,
+  callback: () => void
+) {
+  const callbackRef = useRef(callback)
+  callbackRef.current = callback
+
+  useEffect(() => {
+    const handlePointerDown = (event: MouseEvent | TouchEvent) => {
+      const element = ref.current
+      if (element && !element.contains(event.target as Node)) {
+        callbackRef.current()
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('touchstart', handlePointerDown)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('touchstart', handlePointerDown)
+    }
+  }, [ref])
+}
+
+export function useWindowSize() {
+  const [size, setSize] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }))
+
+  useEffect(() => {
+    const handleResize = () => {
+      setSize({ width: window.innerWidth, height: window.innerHeight })
+    }
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  return size
+}
 
 export function dataURItoBlob(dataURI: string) {
   const mime = dataURI.split(',')[0].split(':')[1].split(';')[0]
@@ -66,7 +107,10 @@ export function useImage(
   const adjustResolution = useCallback(
     (width, height) => {
       const canvas = document.createElement('canvas')
-      const context = canvas.getContext('2d')!
+      const context = canvas.getContext('2d')
+      if (!context) {
+        throw new Error('Unable to get canvas context')
+      }
       canvas.width = width
       canvas.height = height
       context.drawImage(image, 0, 0, width, height)
@@ -131,7 +175,7 @@ export function resizeImageFile(
     if (!ctx) {
       throw new Error('could not get context')
     }
-    canvas.getContext('2d')?.drawImage(image, 0, 0, width, height)
+    ctx.drawImage(image, 0, 0, width, height)
     const dataUrl = canvas.toDataURL('image/jpeg')
     const blob = dataURItoBlob(dataUrl)
     const f = new File([blob], file.name, {
@@ -150,10 +194,17 @@ export function resizeImageFile(
       reject(new Error('Not an image'))
       return
     }
-    reader.onload = (readerEvent: any) => {
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error('Unable to read image data'))
+        return
+      }
       image.onload = () => resolve(resize())
-      image.src = readerEvent.target.result
+      image.onerror = () => reject(new Error('Unable to decode image'))
+      image.src = reader.result
     }
+    reader.onerror = () =>
+      reject(reader.error ?? new Error('Unable to read image'))
     reader.readAsDataURL(file)
   })
 }

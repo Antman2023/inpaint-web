@@ -1,17 +1,14 @@
-FROM node:18 as builder
+FROM node:22-alpine AS builder
 
-WORKDIR /usr/src/app
+WORKDIR /app
 
-# Copy the package.json and package-lock.json files over
-# We do this FIRST so that we don't copy the huge node_modules folder over from our local machine
-# The node_modules can contain machine-specific libraries, so it should be created by the machine that's actually running the code
-COPY . ./
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci
 
-# Now we run NPM install, which includes dev dependencies
-RUN npm install
+COPY . .
+RUN npm run build
 
-FROM alpine:latest as production
-RUN apk --no-cache add nodejs ca-certificates
-WORKDIR /root/
-COPY --from=builder /usr/src/app ./
-CMD [ "node", "node_modules/vite/bin/vite.js", "--host" ]
+FROM caddy:2-alpine AS production
+
+COPY Caddyfile /etc/caddy/Caddyfile
+COPY --from=builder /app/dist /srv

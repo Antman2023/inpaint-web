@@ -1,9 +1,7 @@
 export async function checkWebgpu() {
-  // @ts-ignore
   if (!navigator.gpu) {
     return false
   }
-  // @ts-ignore
   const adapter = await navigator.gpu.requestAdapter()
   if (!adapter) {
     return false
@@ -16,14 +14,16 @@ export const wasm = () =>
 export const threads = () =>
   (async e => {
     try {
-      return (
-        typeof MessageChannel !== 'undefined' &&
-          new MessageChannel().port1.postMessage(new SharedArrayBuffer(1)),
-        WebAssembly.validate(e)
-      )
-      // eslint-disable-next-line @typescript-eslint/no-shadow
-    } catch (e) {
-      return !1
+      if (typeof MessageChannel === 'undefined') {
+        return false
+      }
+      const channel = new MessageChannel()
+      channel.port1.postMessage(new SharedArrayBuffer(1))
+      channel.port1.close()
+      channel.port2.close()
+      return WebAssembly.validate(e)
+    } catch {
+      return false
     }
   })(
     new Uint8Array([
@@ -39,7 +39,14 @@ export const simd = async () =>
     ])
   )
 
-export const getCapabilities = async () => {
+export interface Capabilities {
+  webgpu: boolean
+  wasm: boolean
+  simd: boolean
+  threads: boolean
+}
+
+export const getCapabilities = async (): Promise<Capabilities> => {
   return {
     webgpu: await checkWebgpu(),
     wasm: wasm(),
@@ -65,14 +72,16 @@ export const getTagSrc = async () => {
 
 export const loadingOnnxruntime = async () => {
   const script = document.createElement('script')
+  script.src = await getTagSrc()
+  script.crossOrigin = 'anonymous'
 
-  // 设置script标签的属性，例如src
-  script.src = await getTagSrc() // 替换为您要加载的脚本的URL
-
-  // 将script标签添加到文档的head部分
-  document.head.appendChild(script)
-}
-
-export async function checkGpu() {
-  return !navigator?.gpu && !(await navigator.gpu?.requestAdapter())
+  await new Promise<void>((resolve, reject) => {
+    script.addEventListener('load', () => resolve(), { once: true })
+    script.addEventListener(
+      'error',
+      () => reject(new Error(`Failed to load ONNX Runtime from ${script.src}`)),
+      { once: true }
+    )
+    document.head.appendChild(script)
+  })
 }

@@ -83,8 +83,14 @@ export async function downloadModel(
     console.log('start download from', url)
     setDownloadProgress(0)
     const response = await fetch(url)
+    if (!response.ok) {
+      throw new Error(`Model download failed with status ${response.status}`)
+    }
+    if (!response.body) {
+      throw new Error('Model download response has no body')
+    }
     const fullSize = response.headers.get('content-length')
-    const reader = response.body!.getReader()
+    const reader = response.body.getReader()
     const total: Uint8Array[] = []
     let downloaded = 0
 
@@ -111,7 +117,7 @@ export async function downloadModel(
       offset += chunk.length
     }
 
-    await saveModel(modelType, buffer)
+    await saveModel(modelType, buffer.buffer)
     setDownloadProgress(100)
   }
 

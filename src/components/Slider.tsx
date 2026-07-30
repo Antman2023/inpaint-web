@@ -1,5 +1,7 @@
+import type { ReactNode } from 'react'
+
 type SliderProps = {
-  label?: any
+  label?: ReactNode
   value?: number
   min?: number
   max?: number

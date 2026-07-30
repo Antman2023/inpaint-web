@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import * as m from '../paraglide/messages'
+import { message } from '../i18n'
 
 type FileSelectProps = {
   onSelection: (file: File) => void
@@ -26,13 +26,12 @@ export default function FileSelect(props: FileSelectProps) {
         throw new Error('file too large')
       }
       onSelection(file)
-    } catch (e) {
-      // eslint-disable-next-line
-      alert(`error: ${(e as any).message}`)
+    } catch (error) {
+      alert(`error: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
-  async function getFile(entry: any): Promise<File> {
+  async function getFile(entry: FileSystemFileEntry): Promise<File> {
     return new Promise(resolve => {
       entry.file((file: File) => resolve(file))
     })
@@ -44,20 +43,25 @@ export default function FileSelect(props: FileSelectProps) {
   async function getAllFileEntries(items: DataTransferItemList) {
     const fileEntries: Array<File> = []
     // Use BFS to traverse entire directory/file structure
-    const queue = []
+    const queue: FileSystemEntry[] = []
     // Unfortunately items is not iterable i.e. no forEach
     for (let i = 0; i < items.length; i += 1) {
-      queue.push(items[i].webkitGetAsEntry())
+      const entry = items[i].webkitGetAsEntry()
+      if (entry) {
+        queue.push(entry)
+      }
     }
     while (queue.length > 0) {
       const entry = queue.shift()
       if (entry?.isFile) {
         // Only append images
-        const file = await getFile(entry)
+        const file = await getFile(entry as FileSystemFileEntry)
         fileEntries.push(file)
       } else if (entry?.isDirectory) {
         queue.push(
-          ...(await readAllDirectoryEntries((entry as any).createReader()))
+          ...(await readAllDirectoryEntries(
+            (entry as FileSystemDirectoryEntry).createReader()
+          ))
         )
       }
     }
@@ -66,8 +70,10 @@ export default function FileSelect(props: FileSelectProps) {
 
   // Get all the entries (files or sub-directories) in a directory
   // by calling readEntries until it returns empty array
-  async function readAllDirectoryEntries(directoryReader: any) {
-    const entries = []
+  async function readAllDirectoryEntries(
+    directoryReader: FileSystemDirectoryReader
+  ) {
+    const entries: FileSystemEntry[] = []
     let readEntries = await readEntriesPromise(directoryReader)
     while (readEntries.length > 0) {
       entries.push(...readEntries)
@@ -81,7 +87,9 @@ export default function FileSelect(props: FileSelectProps) {
   // Wrap readEntries in a promise to make working with readEntries easier
   // readEntries will return only some of the entries in a directory
   // e.g. Chrome returns at most 100 entries at a time
-  async function readEntriesPromise(directoryReader: any): Promise<any> {
+  async function readEntriesPromise(
+    directoryReader: FileSystemDirectoryReader
+  ): Promise<FileSystemEntry[]> {
     return new Promise((resolve, reject) => {
       directoryReader.readEntries(resolve, reject)
     })
@@ -128,7 +136,7 @@ export default function FileSelect(props: FileSelectProps) {
           }}
           accept="image/png, image/jpeg, image/webp"
         />
-        <p>{m.drop_zone()}</p>
+        <p>{message('drop_zone')}</p>
       </div>
     </label>
   )

@@ -1,4 +1,4 @@
-import { ReactNode, useState } from 'react'
+import { type ReactNode, useState } from 'react'
 
 interface ButtonProps {
   children: ReactNode
@@ -40,11 +40,8 @@ export default function Button(props: ButtonProps) {
     background = 'hover:bg-primary'
   }
   return (
-    <div
-      role="button"
-      onKeyDown={() => {
-        onDown?.()
-      }}
+    <button
+      type="button"
       onClick={onClick}
       onPointerDown={() => {
         setActive(true)
@@ -60,7 +57,6 @@ export default function Button(props: ButtonProps) {
       onPointerLeave={() => {
         onLeave?.()
       }}
-      tabIndex={-1}
       className={[
         'inline-flex space-x-3 py-3 px-5 rounded-md cursor-pointer',
         background,
@@ -70,6 +66,6 @@ export default function Button(props: ButtonProps) {
     >
       {icon}
       <span className="whitespace-nowrap select-none">{children}</span>
-    </div>
+    </button>
   )
 }

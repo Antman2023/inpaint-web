@@ -1,7 +1,8 @@
 /* eslint-disable no-console */
 /* eslint-disable no-plusplus */
-import cv, { Mat } from 'opencv-ts'
-import { getCapabilities } from './util'
+import cv, { type Mat } from 'opencv-ts'
+import type { InferenceSession, Tensor } from 'onnxruntime-web'
+import { type Capabilities, getCapabilities } from './util'
 import { ensureModel } from './cache'
 
 function loadImage(url: string): Promise<HTMLImageElement> {
@@ -37,8 +38,8 @@ function imgProcess(img: Mat) {
   return chwArray // 返回转换后的数据
 }
 async function tileProc(
-  inputTensor: ort.Tensor,
-  session: ort.InferenceSession,
+  inputTensor: Tensor,
+  session: InferenceSession,
   callback: (progress: number) => void
 ) {
   const inputDims = inputTensor.dims
@@ -77,6 +78,9 @@ async function tileProc(
   const tilesy = Math.ceil(inputDims[2] / tileSizePre)
 
   const { data } = inputTensor
+  if (!(data instanceof Float32Array)) {
+    throw new TypeError('Expected a float32 input tensor')
+  }
 
   console.log(inputTensor)
   const numTiles = tilesx * tilesy
@@ -128,6 +132,9 @@ async function tileProc(
       const results = {
         output: r['1895'],
       }
+      if (!(results.output.data instanceof Float32Array)) {
+        throw new TypeError('Expected a float32 output tensor')
+      }
       console.log(`pre dims:${results.output.dims}`)
 
       const outTileW = tileW * 4
@@ -170,7 +177,7 @@ async function tileProc(
 function processImage(
   img: HTMLImageElement,
   canvasId?: string
-): Promise<Uint8Array> {
+): Promise<Float32Array> {
   return new Promise((resolve, reject) => {
     try {
       const src = cv.imread(img)
@@ -190,12 +197,7 @@ function processImage(
     }
   })
 }
-function configEnv(capabilities: {
-  webgpu: any
-  wasm?: boolean
-  simd: any
-  threads: any
-}) {
+function configEnv(capabilities: Capabilities) {
   ort.env.wasm.wasmPaths =
     'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/'
   if (capabilities.webgpu) {
@@ -243,24 +245,29 @@ function imageDataToDataURL(imageData: ImageData) {
 
   // 绘制 imageData 到 canvas
   const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('Unable to get canvas context')
+  }
   ctx.putImageData(imageData, 0, 0)
 
   // 导出为数据 URL
   return canvas.toDataURL()
 }
-let model: ArrayBuffer | null = null
+let model: InferenceSession | null = null
 export default async function superResolution(
   imageFile: File | HTMLImageElement,
   callback: (progress: number) => void
 ) {
   console.time('sessionCreate')
-  if (!model) {
+  let session = model
+  if (!session) {
     const capabilities = await getCapabilities()
     configEnv(capabilities)
     const modelBuffer = await ensureModel('superResolution')
-    model = await ort.InferenceSession.create(modelBuffer, {
+    session = await ort.InferenceSession.create(modelBuffer, {
       executionProviders: [capabilities.webgpu ? 'webgpu' : 'wasm'],
     })
+    model = session
   }
   console.timeEnd('sessionCreate')
 
@@ -276,9 +283,12 @@ export default async function superResolution(
     img.width,
   ])
 
-  const result = await tileProc(imageTensor, model, callback)
+  const result = await tileProc(imageTensor, session, callback)
   console.time('postProcess')
   const outsTensor = result
+  if (!(outsTensor.data instanceof Float32Array)) {
+    throw new TypeError('Expected a float32 output tensor')
+  }
   const chwToHwcData = postProcess(
     outsTensor.data,
     img.width * 4,

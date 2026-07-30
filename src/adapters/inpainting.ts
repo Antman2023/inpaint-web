@@ -1,10 +1,9 @@
-// @ts-nocheck
 /* eslint-disable camelcase */
 /* eslint-disable no-plusplus */
-import cv, { Mat } from 'opencv-ts'
+import cv, { type Mat } from 'opencv-ts'
+import type { InferenceSession, Tensor } from 'onnxruntime-web'
 import { ensureModel } from './cache'
-import { getCapabilities } from './util'
-import type { modelType } from './cache'
+import { type Capabilities, getCapabilities } from './util'
 // ort.env.debug = true
 // ort.env.logLevel = 'verbose'
 // ort.env.webgpu.profilingMode = 'default'
@@ -55,7 +54,8 @@ function markProcess(img: Mat) {
     const channelData = channels.get(0).data // 获取单个通道的数据
     for (let h = 0; h < H; h++) {
       for (let w = 0; w < W; w++) {
-        chwArray[c * H * W + h * W + w] = (channelData[h * W + w] !== 255) * 255
+        chwArray[c * H * W + h * W + w] =
+          channelData[h * W + w] === 255 ? 0 : 255
       }
     }
   }
@@ -134,7 +134,7 @@ function postProcess(uint8Data: Uint8Array, width: number, height: number) {
   return chwToHwcData
 }
 
-function imageDataToDataURL(imageData) {
+function imageDataToDataURL(imageData: ImageData) {
   // 创建 canvas
   const canvas = document.createElement('canvas')
   canvas.width = imageData.width
@@ -142,13 +142,16 @@ function imageDataToDataURL(imageData) {
 
   // 绘制 imageData 到 canvas
   const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('Unable to get canvas context')
+  }
   ctx.putImageData(imageData, 0, 0)
 
   // 导出为数据 URL
   return canvas.toDataURL()
 }
 
-function configEnv(capabilities) {
+function configEnv(capabilities: Capabilities) {
   ort.env.wasm.wasmPaths =
     'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/'
   if (capabilities.webgpu) {
@@ -193,19 +196,21 @@ const resizeMark = (
     resizedImage.src = resizedImageUrl
   })
 }
-let model: ArrayBuffer | null = null
+let model: InferenceSession | null = null
 export default async function inpaint(
   imageFile: File | HTMLImageElement,
   maskBase64: string
 ) {
   console.time('sessionCreate')
-  if (!model) {
+  let session = model
+  if (!session) {
     const capabilities = await getCapabilities()
     configEnv(capabilities)
     const modelBuffer = await ensureModel('inpaint')
-    model = await ort.InferenceSession.create(modelBuffer, {
+    session = await ort.InferenceSession.create(modelBuffer, {
       executionProviders: [capabilities.webgpu ? 'webgpu' : 'wasm'],
     })
+    model = session
   }
   console.timeEnd('sessionCreate')
   console.time('preProcess')
@@ -238,21 +243,22 @@ export default async function inpaint(
     originalImg.width,
   ])
 
-  const Feed: {
-    [key: string]: any
-  } = {
-    [model.inputNames[0]]: imageTensor,
-    [model.inputNames[1]]: maskTensor,
+  const feed: Record<string, Tensor> = {
+    [session.inputNames[0]]: imageTensor,
+    [session.inputNames[1]]: maskTensor,
   }
 
   console.timeEnd('preProcess')
 
   console.time('run')
-  const results = await model.run(Feed)
+  const results = await session.run(feed)
   console.timeEnd('run')
 
   console.time('postProcess')
-  const outsTensor = results[model.outputNames[0]]
+  const outsTensor = results[session.outputNames[0]]
+  if (!(outsTensor.data instanceof Uint8Array)) {
+    throw new TypeError('Expected a uint8 output tensor')
+  }
   const chwToHwcData = postProcess(
     outsTensor.data,
     originalImg.width,
