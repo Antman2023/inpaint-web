@@ -53,32 +53,13 @@ Demo link: https://inpaint.itsong.com
 
 ## Contributors
 
-<a href="https://github.com/lxfater/inpaint-web/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=lxfater/inpaint-web" />
+<a href="https://github.com/Antman2023/inpaint-web/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Antman2023/inpaint-web" />
 </a>
 
 ## Translations via [fink editor](https://inlang.com/m/tdozzpar/app-inlang-editor)
 
-[![inlang status badge](https://inlang.com/badge?url=github.com/lxfater/inpaint-web)](https://inlang.com/editor/github.com/lxfater/inpaint-web?ref=badge)
-
-## About me
-
-### Wechat
-
-<div align="left">
-    <p>联系我之前说明来意，我创业了，时间很宝贵。</p>
-    <img src="https://tinyeraserblog.lxfater.com/G7yayw4aMAgN_Zs.jpeg" style="width: 200px; display: inline-block;">
-</div>
-
-### English Content
-
-For updates and discussions in English, follow me on Twitter:
-[![Twitter Follow](https://img.shields.io/twitter/follow/rules4thing?style=social)](https://twitter.com/rules4thing)
-
-### 中文内容
-
-获取中文更新和讨论，请关注我的 Twitter:
-[![Twitter Follow](https://img.shields.io/twitter/follow/lxfater?style=social)](https://twitter.com/lxfater)
+[![inlang status badge](https://inlang.com/badge?url=github.com/Antman2023/inpaint-web)](https://inlang.com/editor/github.com/Antman2023/inpaint-web?ref=badge)
 
 ## Acknowledgements
 
@@ -89,20 +70,4 @@ Model: https://github.com/Picsart-AI-Research/MI-GAN
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=lxfater/inpaint-web&type=Date)](https://star-history.com/#lxfater/inpaint-web&Date)
-
-## Other Projects by the Author (作者的其他项目)
-
-### 中文
-
-查看我的其他项目：
-
-- [Demoget](https://www.demoget.com/zh)：免费的自动放大，鼠标轨迹优化的录屏软件。
-- [tinyeraser](https://www.tinyeraser.com/zh)：免费，批量，快速，一键换背景。
-
-### English
-
-Check out my other projects:
-
-- [Demoget](https://www.demoget.com/en): Free screen recording software with auto-zoom and mouse trajectory optimization.
-- [tinyeraser](https://www.tinyeraser.com/en): Free, batch, fast, one-click background replacement.
+[![Star History Chart](https://api.star-history.com/svg?repos=Antman2023/inpaint-web&type=Date)](https://star-history.com/#Antman2023/inpaint-web&Date)

@@ -181,7 +181,7 @@ function App() {
                 ? '如果遇到问题或有功能建议，欢迎前往 GitHub 反馈。'
                 : 'Questions or feature ideas are welcome on GitHub.'}{' '}
               <a
-                href="https://github.com/lxfater/inpaint-web"
+                href="https://github.com/Antman2023/inpaint-web"
                 className="font-bold text-ink underline decoration-primary decoration-2 underline-offset-4"
                 rel="noreferrer"
                 target="_blank"
