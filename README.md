@@ -1,8 +1,7 @@
 ![Inpaint-web](./media/cover.png)
 <div align="center">
-  
-# Inpaint-web
 
+# Inpaint-web
 
 A free and open-source inpainting & image-upscaling tool powered by webgpu and wasm on the browser.
 
@@ -20,7 +19,7 @@ https://github.com/lxfater/inpaint-web/assets/22794120/3a8d894f-9749-4685-b947-8
 
 ## Demo link
 
-Demo link:https://inpaintweb.lxfater.com/
+Demo link: https://inpaint.itsong.com
 
 ## Project Roadmap
 
@@ -92,7 +91,6 @@ Model: https://github.com/Picsart-AI-Research/MI-GAN
 
 [![Star History Chart](https://api.star-history.com/svg?repos=lxfater/inpaint-web&type=Date)](https://star-history.com/#lxfater/inpaint-web&Date)
 
-
 ## Other Projects by the Author (作者的其他项目)
 
 ### 中文
@@ -108,4 +106,3 @@ Check out my other projects:
 
 - [Demoget](https://www.demoget.com/en): Free screen recording software with auto-zoom and mouse trajectory optimization.
 - [tinyeraser](https://www.tinyeraser.com/en): Free, batch, fast, one-click background replacement.
-
