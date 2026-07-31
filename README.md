@@ -59,7 +59,7 @@ Demo link: https://inpaint.itsong.com
 
 ## Translations via [fink editor](https://inlang.com/m/tdozzpar/app-inlang-editor)
 
-[![inlang status badge](https://inlang.com/badge?url=github.com/Antman2023/inpaint-web)](https://inlang.com/editor/github.com/Antman2023/inpaint-web?ref=badge)
+[![Translations: Inlang](https://img.shields.io/badge/translations-inlang-5e5ce6)](https://fink.inlang.com/github.com/Antman2023/inpaint-web)
 
 ## Acknowledgements
 
@@ -70,4 +70,4 @@ Model: https://github.com/Picsart-AI-Research/MI-GAN
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Antman2023/inpaint-web&type=Date)](https://star-history.com/#Antman2023/inpaint-web&Date)
+[![GitHub Stars](https://img.shields.io/github/stars/Antman2023/inpaint-web?style=flat-square&logo=github)](https://github.com/Antman2023/inpaint-web)
