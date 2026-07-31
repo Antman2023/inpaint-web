@@ -1,12 +1,125 @@
 @import 'tailwindcss';
 
-@theme {
-  --color-primary: #bdff01;
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-panel-strong: var(--panel-strong);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-hover: var(--hover);
+  --color-overlay: var(--overlay);
+  --color-primary: var(--accent);
+  --color-primary-strong: var(--accent-strong);
+  --color-primary-ink: var(--accent-ink);
   --animate-pulse-fast: pulse 0.7s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
+:root {
+  --canvas: #f4f4ef;
+  --panel: #fdfdf9;
+  --panel-strong: #e8e8e1;
+  --ink: #171815;
+  --muted: #666960;
+  --line: #d5d6cd;
+  --hover: #e4e5dc;
+  --overlay: rgb(23 24 21 / 58%);
+  --accent: #bdff01;
+  --accent-strong: #a8e600;
+  --accent-ink: #11150a;
+}
+
+:root[data-theme='dark'] {
+  --canvas: #11130f;
+  --panel: #191c17;
+  --panel-strong: #242820;
+  --ink: #f1f2e9;
+  --muted: #a6aa9d;
+  --line: #34392f;
+  --hover: #282d24;
+  --overlay: rgb(5 6 4 / 72%);
+  --accent: #bdff01;
+  --accent-strong: #d0ff48;
+  --accent-ink: #101408;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+html {
+  background: var(--canvas);
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  overflow: hidden;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+}
+
+button,
+a,
+input {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.theme-surface,
+.theme-control {
+  transition:
+    color 180ms ease,
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.workspace-enter {
+  animation: workspace-enter 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.toolbar-enter {
+  animation: toolbar-enter 360ms 80ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.sample-button {
+  transition:
+    transform 180ms ease,
+    opacity 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.sample-button:hover {
+  transform: translateY(-4px) scale(1.02);
+}
+
+.sample-button:focus-visible,
+.theme-control:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.theme-slider {
+  accent-color: var(--accent);
+}
+
+.theme-slider::-webkit-slider-thumb {
+  cursor: grab;
+}
+
 .history-scrollbar {
-  scrollbar-color: #000 #bdff01;
+  scrollbar-color: var(--accent) var(--panel-strong);
   scrollbar-width: thin;
 }
 
@@ -15,9 +128,45 @@
 }
 
 .history-scrollbar::-webkit-scrollbar-track {
-  background: #bdff01;
+  background: var(--panel-strong);
 }
 
 .history-scrollbar::-webkit-scrollbar-thumb {
-  background: #000;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+@keyframes workspace-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toolbar-enter {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-enter,
+  .toolbar-enter {
+    animation: none;
+  }
+
+  .theme-surface,
+  .theme-control,
+  .sample-button {
+    transition: none;
+  }
 }

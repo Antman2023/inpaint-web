@@ -1,13 +1,13 @@
-import { type ReactNode, useState } from 'react'
+import { type CSSProperties, type ReactNode, useState } from 'react'
 
 interface ButtonProps {
   children: ReactNode
   className?: string
   icon?: ReactNode
   primary?: boolean
-  style?: {
-    [key: string]: string
-  }
+  style?: CSSProperties
+  ariaLabel?: string
+  disabled?: boolean
   onClick?: () => void
   onDown?: () => void
   onUp?: () => void
@@ -27,23 +27,27 @@ export default function Button(props: ButtonProps) {
     onUp,
     onEnter,
     onLeave,
+    ariaLabel,
+    disabled,
   } = props
   const [active, setActive] = useState(false)
-  let background = ''
+  let appearance = 'bg-transparent text-ink hover:bg-hover'
   if (primary) {
-    background = 'bg-primary hover:bg-black hover:text-white'
+    appearance =
+      'bg-primary text-primary-ink hover:bg-primary-strong shadow-[0_8px_24px_rgba(189,255,1,0.16)]'
   }
-  if (active) {
-    background = 'bg-black text-white'
+  if (active && !disabled) {
+    appearance = 'bg-ink text-canvas'
   }
-  if (!primary && !active) {
-    background = 'hover:bg-primary'
-  }
+
   return (
     <button
       type="button"
+      aria-label={ariaLabel}
+      disabled={disabled}
       onClick={onClick}
       onPointerDown={() => {
+        if (disabled) return
         setActive(true)
         onDown?.()
       }}
@@ -55,11 +59,13 @@ export default function Button(props: ButtonProps) {
         onEnter?.()
       }}
       onPointerLeave={() => {
+        setActive(false)
         onLeave?.()
       }}
       className={[
-        'inline-flex space-x-3 py-3 px-5 rounded-md cursor-pointer',
-        background,
+        'theme-control inline-flex min-h-10 items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold sm:px-4',
+        'disabled:pointer-events-none disabled:opacity-35',
+        appearance,
         className,
       ].join(' ')}
       style={style}

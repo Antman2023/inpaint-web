@@ -1,3 +1,4 @@
+import { PhotographIcon } from '@heroicons/react/outline'
 import { useState } from 'react'
 import { message } from '../i18n'
 
@@ -105,15 +106,15 @@ export default function FileSelect(props: FileSelectProps) {
   return (
     <label
       htmlFor={uploadElemId}
-      className="block w-full h-full group relative cursor-pointer rounded-md font-medium focus-within:outline-none"
+      className="group relative block h-full w-full cursor-pointer font-medium focus-within:outline-none"
     >
       <div
         className={[
-          'w-full h-full flex items-center justify-center px-6 pt-5 pb-6 text-xl',
-          'border-4 border-dashed rounded-md',
-          'hover:border-black hover:bg-primary',
-          'text-center',
-          dragHover ? 'border-black bg-primary' : 'bg-gray-100 border-gray-300',
+          'upload-zone theme-surface flex h-full w-full items-center justify-center rounded-3xl border border-dashed px-6 py-8 text-center',
+          'border-line bg-panel hover:border-primary hover:bg-hover',
+          dragHover
+            ? 'scale-[1.01] border-primary bg-hover shadow-[0_0_0_4px_rgba(189,255,1,0.12)]'
+            : '',
         ].join(' ')}
         onDrop={handleDrop}
         onDragOver={ev => {
@@ -136,7 +137,17 @@ export default function FileSelect(props: FileSelectProps) {
           }}
           accept="image/png, image/jpeg, image/webp"
         />
-        <p>{message('drop_zone')}</p>
+        <div className="flex flex-col items-center">
+          <span className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-primary text-primary-ink shadow-[0_12px_32px_rgba(189,255,1,0.18)] transition-transform duration-200 group-hover:-translate-y-1">
+            <PhotographIcon className="h-7 w-7" />
+          </span>
+          <p className="text-lg font-bold tracking-tight sm:text-xl">
+            {message('drop_zone')}
+          </p>
+          <p className="mt-2 text-sm font-normal text-muted">
+            {message('supported_files')}
+          </p>
+        </div>
       </div>
     </label>
   )

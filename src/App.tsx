@@ -1,6 +1,11 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable jsx-a11y/control-has-associated-label */
-import { ArrowLeftIcon, InformationCircleIcon } from '@heroicons/react/outline'
+import {
+  ArrowLeftIcon,
+  InformationCircleIcon,
+  MoonIcon,
+  SunIcon,
+} from '@heroicons/react/outline'
 import { useEffect, useRef, useState } from 'react'
 import Button from './components/Button'
 import FileSelect from './components/FileSelect'
@@ -10,6 +15,9 @@ import { resizeImageFile, useClickAway } from './utils'
 import Progress from './components/Progress'
 import { downloadModel } from './adapters/cache'
 import { type LanguageTag, languageTag, message, setLanguageTag } from './i18n'
+import { useTheme } from './theme'
+
+const EXAMPLE_IMAGES = ['bag', 'dog', 'car', 'bird', 'jacket', 'shoe', 'paris']
 
 function App() {
   const [file, setFile] = useState<File>()
@@ -20,6 +28,7 @@ function App() {
   const modalRef = useRef<HTMLDivElement>(null)
 
   const [downloadProgress, setDownloadProgress] = useState(100)
+  const { theme, toggleTheme } = useTheme()
 
   useEffect(() => {
     downloadModel('inpaint', setDownloadProgress)
@@ -35,61 +44,93 @@ function App() {
   }
 
   return (
-    <div className="min-h-full flex flex-col">
-      <header className="z-10 shadow flex flex-row items-center md:justify-between h-14">
-        <Button
-          className={[
-            file ? '' : 'opacity-50 pointer-events-none',
-            'pl-1 pr-1 mx-1 sm:mx-5',
-          ].join(' ')}
-          icon={<ArrowLeftIcon className="w-6 h-6" />}
-          onClick={() => {
-            setFile(undefined)
-          }}
-        >
-          <div className="md:w-[290px]">
-            <span className="hidden sm:inline select-none">
-              {message('start_new')}
-            </span>
-          </div>
-        </Button>
-        <div className="text-4xl font-bold text-blue-600 hover:text-blue-700 transition duration-300 ease-in-out">
-          Inpaint-web
-        </div>
-        <div className="hidden md:flex justify-end w-[300px] mx-1 sm:mx-5">
+    <div className="app-shell theme-surface flex min-h-full flex-col bg-canvas text-ink">
+      <header className="app-header theme-surface z-30 grid h-16 flex-none grid-cols-[1fr_auto_1fr] items-center border-b border-line bg-panel/90 px-2 backdrop-blur-xl sm:px-4">
+        <div className="flex min-w-0 justify-start">
           <Button
-            className="mr-5 flex"
+            disabled={!file}
+            ariaLabel={message('start_new')}
+            className="!px-2 sm:!px-3"
+            icon={<ArrowLeftIcon className="h-5 w-5" />}
+            onClick={() => setFile(undefined)}
+          >
+            <span className="hidden sm:inline">{message('start_new')}</span>
+          </Button>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setFile(undefined)}
+          className="theme-control rounded-lg px-2 text-xl font-black tracking-[-0.04em] text-ink sm:text-2xl"
+        >
+          Inpaint<span className="text-primary">—web</span>
+        </button>
+
+        <div className="flex min-w-0 items-center justify-end gap-1">
+          <Button
+            ariaLabel={
+              theme === 'dark'
+                ? message('theme_to_light')
+                : message('theme_to_dark')
+            }
+            className="!h-10 !w-10 !px-0"
+            icon={
+              theme === 'dark' ? (
+                <SunIcon className="h-5 w-5" />
+              ) : (
+                <MoonIcon className="h-5 w-5" />
+              )
+            }
+            onClick={toggleTheme}
+          >
+            <span className="sr-only">
+              {theme === 'dark'
+                ? message('theme_to_light')
+                : message('theme_to_dark')}
+            </span>
+          </Button>
+          <Button
+            ariaLabel={
+              stateLanguageTag === 'en' ? '切换到中文' : 'Switch to English'
+            }
+            className="!h-10 !min-w-10 !px-2 uppercase"
             onClick={() => {
               const nextLanguageTag = stateLanguageTag === 'zh' ? 'en' : 'zh'
               setLanguageTag(nextLanguageTag)
               setStateLanguageTag(nextLanguageTag)
             }}
           >
-            <p>{stateLanguageTag === 'en' ? '切换到中文' : 'en'}</p>
+            {stateLanguageTag === 'en' ? '中' : 'EN'}
           </Button>
           <Button
-            className="w-38 flex sm:visible"
-            icon={<InformationCircleIcon className="w-6 h-6" />}
-            onClick={() => {
-              setShowAbout(true)
-            }}
+            ariaLabel={message('feedback')}
+            className="!h-10 !w-10 !px-0"
+            icon={<InformationCircleIcon className="h-5 w-5" />}
+            onClick={() => setShowAbout(true)}
           >
-            <p>{message('feedback')}</p>
+            <span className="sr-only">{message('feedback')}</span>
           </Button>
         </div>
       </header>
 
-      <main
-        style={{
-          height: 'calc(100vh - 56px)',
-        }}
-        className=" relative"
-      >
+      <main className="relative h-[calc(100svh-4rem)] min-h-0">
         {file ? (
           <Editor file={file} />
         ) : (
-          <div className="flex h-full flex-1 flex-col items-center justify-center overflow-hidden">
-            <div className="h-72 sm:w-1/2 max-w-5xl">
+          <section className="workspace-enter mx-auto flex h-full w-full max-w-6xl flex-col justify-center overflow-y-auto px-4 py-6 sm:px-8 sm:py-10">
+            <div className="mx-auto mb-6 max-w-2xl text-center sm:mb-8">
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-primary sm:text-sm">
+                {message('workspace_eyebrow')}
+              </p>
+              <h1 className="mt-3 text-2xl font-black tracking-[-0.035em] text-ink sm:text-4xl">
+                {message('workspace_title')}
+              </h1>
+              <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-muted sm:text-base">
+                {message('workspace_description')}
+              </p>
+            </div>
+
+            <div className="mx-auto h-[clamp(15rem,34svh,21rem)] w-full max-w-3xl">
               <FileSelect
                 onSelection={async f => {
                   const { file: resizedFile } = await resizeImageFile(
@@ -100,68 +141,63 @@ function App() {
                 }}
               />
             </div>
-            <div className="flex flex-col sm:flex-row pt-10 items-center justify-center cursor-pointer">
-              <span className="text-gray-500">{message('try_it_images')}</span>
-              <div className="flex space-x-2 sm:space-x-4 px-4">
-                {['bag', 'dog', 'car', 'bird', 'jacket', 'shoe', 'paris'].map(
-                  image => (
-                    <button
-                      type="button"
-                      key={image}
-                      onClick={() => startWithDemoImage(image)}
-                      className="border-0 bg-transparent p-0"
-                    >
-                      <img
-                        className="rounded-md hover:opacity-75 w-auto h-25"
-                        src={`examples/${image}.jpeg`}
-                        alt={image}
-                        style={{ height: '100px' }}
-                      />
-                    </button>
-                  )
-                )}
+
+            <div className="mx-auto mt-7 w-full max-w-5xl sm:mt-9">
+              <p className="mb-3 text-center text-xs font-bold uppercase tracking-[0.18em] text-muted">
+                {message('try_it_images')}
+              </p>
+              <div className="history-scrollbar flex snap-x gap-3 overflow-x-auto px-[calc(50%_-_2.75rem)] pb-3 sm:justify-center sm:px-0">
+                {EXAMPLE_IMAGES.map(image => (
+                  <button
+                    type="button"
+                    key={image}
+                    onClick={() => startWithDemoImage(image)}
+                    className="sample-button theme-control h-20 w-24 flex-none snap-center overflow-hidden rounded-2xl border border-line bg-panel shadow-sm sm:h-24 sm:w-28"
+                  >
+                    <img
+                      className="h-full w-full object-cover"
+                      src={`examples/${image}.jpeg`}
+                      alt={image}
+                    />
+                  </button>
+                ))}
               </div>
             </div>
-          </div>
+          </section>
         )}
       </main>
 
       {showAbout && (
         <Modal>
-          <div ref={modalRef} className="text-xl space-y-5">
-            <p>
-              {' '}
-              任何问题到:{' '}
-              <a
-                href="https://github.com/lxfater/inpaint-web"
-                style={{ color: 'blue' }}
-                rel="noreferrer"
-                target="_blank"
-              >
-                Inpaint-web
-              </a>{' '}
-              反馈
+          <div ref={modalRef} className="space-y-4">
+            <p className="text-xs font-black uppercase tracking-[0.2em] text-primary">
+              Inpaint—web
             </p>
-            <p>
-              {' '}
-              For any questions, please go to:{' '}
+            <h2 className="text-2xl font-black tracking-tight">
+              {message('feedback')}
+            </h2>
+            <p className="leading-7 text-muted">
+              {stateLanguageTag === 'zh'
+                ? '如果遇到问题或有功能建议，欢迎前往 GitHub 反馈。'
+                : 'Questions or feature ideas are welcome on GitHub.'}{' '}
               <a
                 href="https://github.com/lxfater/inpaint-web"
-                style={{ color: 'blue' }}
+                className="font-bold text-ink underline decoration-primary decoration-2 underline-offset-4"
                 rel="noreferrer"
                 target="_blank"
               >
-                Inpaint-web
-              </a>{' '}
-              to provide feedback.
+                GitHub
+              </a>
             </p>
           </div>
         </Modal>
       )}
       {!(downloadProgress === 100) && (
         <Modal>
-          <div className="text-xl space-y-5">
-            <p>{message('inpaint_model_download_message')}</p>
+          <div className="space-y-5">
+            <p className="text-lg font-bold leading-7">
+              {message('inpaint_model_download_message')}
+            </p>
             <Progress percent={downloadProgress} />
           </div>
         </Modal>

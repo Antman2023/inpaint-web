@@ -500,42 +500,31 @@ export default function Editor(props: EditorProps) {
   return (
     <div
       className={[
-        'flex flex-col items-center h-full justify-between',
+        'editor-shell theme-surface flex h-full min-h-0 flex-col items-center overflow-hidden bg-canvas px-3 sm:px-6',
         isInpaintingLoading ? 'animate-pulse-fast pointer-events-none' : '',
       ].join(' ')}
     >
       {/* History */}
-      <div
-        ref={historyListRef}
-        style={{
-          height: '116px',
-        }}
-        className={[
-          'flex-shrink-0',
-          'mt-4 border p-3 rounded',
-          'flex items-left w-full max-w-4xl',
-          'space-y-0 flex-row space-x-5',
-          'history-scrollbar overflow-x-scroll',
-        ].join(' ')}
-      >
-        {History}
-      </div>
+      {renders.length > 0 && (
+        <div
+          ref={historyListRef}
+          className={[
+            'theme-surface history-scrollbar mt-3 flex h-28 w-full max-w-5xl flex-none flex-row items-center gap-4 overflow-x-auto rounded-2xl border border-line bg-panel p-3 shadow-sm',
+          ].join(' ')}
+        >
+          {History}
+        </div>
+      )}
       {/* 画图 */}
       <div
         className={[
-          'flex-grow',
-          'flex justify-center',
-          'my-2',
-          'relative',
+          'relative flex min-h-0 w-full max-w-[min(92vw,90rem)] flex-1 items-center justify-center py-3',
         ].join(' ')}
-        style={{
-          width: '70vw',
-        }}
         ref={canvasDiv}
       >
-        <div className="relative">
+        <div className="relative flex items-center justify-center">
           <canvas
-            className="rounded-sm"
+            className="rounded-xl shadow-2xl shadow-black/20"
             style={showBrush ? { cursor: 'none' } : {}}
             ref={r => {
               if (r && !context) {
@@ -567,7 +556,9 @@ export default function Editor(props: EditorProps) {
             <div
               className={[
                 'absolute top-0 right-0 pointer-events-none z-10',
-                useSeparator ? 'bg-black text-white' : 'bg-primary ',
+                useSeparator
+                  ? 'bg-ink text-canvas'
+                  : 'bg-primary text-primary-ink',
                 'w-1',
                 'flex items-center justify-center',
                 'separator',
@@ -580,13 +571,15 @@ export default function Editor(props: EditorProps) {
                 transitionDuration: '300ms',
               }}
             >
-              <span className="absolute left-1 bottom-0 p-1 bg-opacity-25 bg-black rounded text-white select-none">
+              <span className="absolute bottom-0 left-2 rounded-lg bg-black/60 px-2 py-1 text-xs font-bold text-white select-none">
                 original
               </span>
               <div
                 className={[
-                  'absolute py-2 px-1 rounded-md pointer-events-auto',
-                  useSeparator ? 'bg-black' : 'bg-primary ',
+                  'theme-control pointer-events-auto absolute rounded-xl px-1 py-3 shadow-lg',
+                  useSeparator
+                    ? 'bg-ink text-canvas'
+                    : 'bg-primary text-primary-ink',
                 ].join(' ')}
                 style={{ cursor: 'ew-resize' }}
                 ref={r => {
@@ -616,10 +609,15 @@ export default function Editor(props: EditorProps) {
             />
           </div>
           {isInpaintingLoading && (
-            <div className="z-10 bg-white absolute bg-opacity-80 top-0 left-0 right-0 bottom-0  h-full w-full flex justify-center items-center">
-              <div ref={modalRef} className="text-xl space-y-5 w-4/5 sm:w-1/2">
-                <p>正在处理中，请耐心等待。。。</p>
-                <p>It is being processed, please be patient...</p>
+            <div className="theme-surface absolute inset-0 z-10 flex h-full w-full items-center justify-center rounded-xl bg-panel/90 backdrop-blur-sm">
+              <div
+                ref={modalRef}
+                className="w-4/5 space-y-4 text-center sm:w-1/2"
+              >
+                <p className="text-lg font-black">正在处理中，请耐心等待</p>
+                <p className="text-sm text-muted">
+                  Processing in your browser. This may take a moment.
+                </p>
                 <Progress percent={generateProgress} />
               </div>
             </div>
@@ -629,15 +627,17 @@ export default function Editor(props: EditorProps) {
 
       {!downloaded && (
         <Modal>
-          <div className="text-xl space-y-5">
-            <p>{message('upscaleing_model_download_message')}</p>
+          <div className="space-y-5">
+            <p className="text-lg font-bold leading-7">
+              {message('upscaleing_model_download_message')}
+            </p>
             <Progress percent={downloadProgress} />
           </div>
         </Modal>
       )}
       {showBrush && (
         <div
-          className="fixed rounded-full bg-red-500 bg-opacity-50 pointer-events-none left-0 top-0"
+          className="fixed left-0 top-0 rounded-full border border-white/50 bg-red-500/45 shadow-[0_0_0_1px_rgba(0,0,0,0.25)] pointer-events-none"
           style={{
             width: `${scaledBrushSize}px`,
             height: `${scaledBrushSize}px`,
@@ -649,15 +649,14 @@ export default function Editor(props: EditorProps) {
       {/* 工具栏 */}
       <div
         className={[
-          'flex-shrink-0',
-          'bg-white rounded-md border border-gray-300 hover:border-gray-400 shadow-md hover:shadow-lg p-4 transition duration-200 ease-in-out',
-          'flex items-center w-full max-w-4xl py-6 mb-4, justify-between',
-          'flex-col space-y-2 sm:space-y-0 sm:flex-row sm:space-x-5',
+          'toolbar-enter theme-surface mb-3 grid w-full max-w-5xl flex-none grid-cols-2 items-center gap-2 rounded-2xl border border-line bg-panel/95 p-3 shadow-xl backdrop-blur-xl',
+          'sm:flex sm:flex-row sm:justify-between sm:gap-3',
         ].join(' ')}
       >
         {renders.length > 0 && (
           <Button
             primary
+            className="w-full sm:w-auto"
             onClick={undo}
             icon={
               <svg
@@ -679,16 +678,19 @@ export default function Editor(props: EditorProps) {
             {message('undo')}
           </Button>
         )}
-        <Slider
-          label={message('bruch_size')}
-          min={10}
-          max={200}
-          value={brushSize}
-          onChange={handleSliderChange}
-          onStart={handleSliderStart}
-        />
+        <div className="col-span-2 flex justify-center sm:contents">
+          <Slider
+            label={message('bruch_size')}
+            min={10}
+            max={200}
+            value={brushSize}
+            onChange={handleSliderChange}
+            onStart={handleSliderStart}
+          />
+        </div>
         <Button
           primary={showOriginal}
+          className="w-full sm:w-auto"
           icon={<EyeIcon className="w-6 h-6" />}
           onUp={() => {
             setShowOriginal(!showOriginal)
@@ -698,11 +700,14 @@ export default function Editor(props: EditorProps) {
           {message('original')}
         </Button>
         {!showOriginal && (
-          <Button onUp={onSuperResolution}>{message('upscale')}</Button>
+          <Button className="w-full sm:w-auto" onUp={onSuperResolution}>
+            {message('upscale')}
+          </Button>
         )}
 
         <Button
           primary
+          className="w-full sm:w-auto"
           icon={<DownloadIcon className="w-6 h-6" />}
           onClick={download}
         >

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -7,13 +7,29 @@
       content="width=device-width, initial-scale=1, maximum-scale=1.0, user-scalable=0"
     />
     <title>Inpaint-web</title>
-
+    <script>
+      ;(() => {
+        let storedTheme = null
+        try {
+          storedTheme = localStorage.getItem('inpaint-theme')
+        } catch {
+          // Theme still follows the system when storage is unavailable.
+        }
+        const theme =
+          storedTheme === 'light' || storedTheme === 'dark'
+            ? storedTheme
+            : matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+        document.documentElement.dataset.theme = theme
+        document.documentElement.style.colorScheme = theme
+      })()
+    </script>
   </head>
-  <body class="h-screen">
+  <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root" class="h-full"></div>
-  
+
     <script type="module" src="/src/index.tsx"></script>
   </body>
-
 </html>

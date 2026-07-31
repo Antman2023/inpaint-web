@@ -15,10 +15,11 @@ export default function Slider(props: SliderProps) {
   const step = ((max || 100) - (min || 0)) / 100
 
   return (
-    <div className="inline-flex items-center space-x-4 text-black">
-      <span>{label}</span>
+    <label className="inline-flex min-w-[180px] items-center gap-3 text-sm font-medium text-ink">
+      <span className="whitespace-nowrap text-muted">{label}</span>
       <input
-        className={['appearance-none rounded-lg h-4', 'bg-primary'].join(' ')}
+        aria-label={typeof label === 'string' ? label : undefined}
+        className="theme-slider h-2 min-w-24 flex-1 cursor-pointer appearance-none rounded-full bg-panel-strong"
         type="range"
         step={step}
         min={min}
@@ -31,6 +32,6 @@ export default function Slider(props: SliderProps) {
           onChange(parseInt(ev.currentTarget.value, 10))
         }}
       />
-    </div>
+    </label>
   )
 }
