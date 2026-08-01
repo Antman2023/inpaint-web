@@ -146,7 +146,7 @@ function App() {
               <p className="mb-3 text-center text-xs font-bold uppercase tracking-[0.18em] text-muted">
                 {message('try_it_images')}
               </p>
-              <div className="history-scrollbar flex snap-x gap-3 overflow-x-auto px-[calc(50%_-_2.75rem)] pb-3 sm:justify-center sm:px-0">
+              <div className="history-scrollbar -mt-2 flex snap-x gap-3 overflow-x-auto px-[calc(50%_-_2.75rem)] pt-2 pb-3 sm:justify-center sm:px-0">
                 {EXAMPLE_IMAGES.map(image => (
                   <button
                     type="button"
