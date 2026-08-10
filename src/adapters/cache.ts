@@ -57,18 +57,19 @@ export async function loadModel(modelType: modelType): Promise<ArrayBuffer> {
 
 export async function modelExists(modelType: modelType) {
   const model = await loadModel(modelType)
-  return model !== null && model !== undefined
+  return model instanceof ArrayBuffer && model.byteLength > 0
 }
 
 export async function ensureModel(modelType: modelType) {
   if (await modelExists(modelType)) {
     return loadModel(modelType)
   }
-  const model = getModel(modelType)
-  const response = await fetch(model.url)
-  const buffer = await response.arrayBuffer()
-  await saveModel(modelType, buffer)
-  return buffer
+  await downloadModel(modelType, () => {})
+  const model = await loadModel(modelType)
+  if (!(model instanceof ArrayBuffer) || model.byteLength === 0) {
+    throw new Error('Downloaded model is empty')
+  }
+  return model
 }
 
 export async function downloadModel(
@@ -76,6 +77,7 @@ export async function downloadModel(
   setDownloadProgress: (arg0: number) => void
 ) {
   if (await modelExists(modelType)) {
+    setDownloadProgress(100)
     return
   }
 
@@ -89,7 +91,7 @@ export async function downloadModel(
     if (!response.body) {
       throw new Error('Model download response has no body')
     }
-    const fullSize = response.headers.get('content-length')
+    const fullSize = Number(response.headers.get('content-length'))
     const reader = response.body.getReader()
     const total: Uint8Array[] = []
     let downloaded = 0
@@ -107,7 +109,9 @@ export async function downloadModel(
         total.push(value)
       }
 
-      setDownloadProgress((downloaded / Number(fullSize)) * 100)
+      if (Number.isFinite(fullSize) && fullSize > 0) {
+        setDownloadProgress(Math.min(99, (downloaded / fullSize) * 100))
+      }
     }
 
     const buffer = new Uint8Array(downloaded)
@@ -122,16 +126,19 @@ export async function downloadModel(
   }
 
   const model = getModel(modelType)
-  try {
-    await downloadFromUrl(model.url)
-  } catch (e) {
-    if (model.backupUrl) {
-      try {
-        await downloadFromUrl(model.backupUrl)
-      } catch (r) {
-        alert(`Failed to download the backup model: ${r}`)
-      }
+  const urls = [model.url, model.backupUrl].filter(Boolean)
+  const errors: unknown[] = []
+  for (const url of urls) {
+    try {
+      await downloadFromUrl(url)
+      return
+    } catch (error) {
+      errors.push(error)
     }
-    alert(`Failed to download the model, network problem: ${e}`)
   }
+
+  const details = errors
+    .map(error => (error instanceof Error ? error.message : String(error)))
+    .join('; ')
+  throw new Error(`Failed to download the model: ${details}`)
 }

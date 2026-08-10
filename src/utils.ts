@@ -123,14 +123,18 @@ export function useImage(
 
   useEffect(() => {
     const newImage = new Image()
+    const objectUrl = URL.createObjectURL(file)
+    setIsLoaded(false)
     newImage.onload = () => {
       setIsLoaded(true)
     }
-    newImage.src = URL.createObjectURL(file)
+    newImage.src = objectUrl
     setImage(newImage)
 
     return () => {
       newImage.onload = null
+      newImage.onerror = null
+      URL.revokeObjectURL(objectUrl)
     }
   }, [file])
 
@@ -176,10 +180,14 @@ export function resizeImageFile(
       throw new Error('could not get context')
     }
     ctx.drawImage(image, 0, 0, width, height)
-    const dataUrl = canvas.toDataURL('image/jpeg')
+    const outputType =
+      file.type === 'image/png' || file.type === 'image/webp'
+        ? file.type
+        : 'image/jpeg'
+    const dataUrl = canvas.toDataURL(outputType)
     const blob = dataURItoBlob(dataUrl)
     const f = new File([blob], file.name, {
-      type: file.type,
+      type: outputType,
     })
     return {
       file: f,

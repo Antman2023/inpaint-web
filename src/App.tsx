@@ -6,11 +6,10 @@ import {
   MoonIcon,
   SunIcon,
 } from '@heroicons/react/outline'
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import Button from './components/Button'
 import FileSelect from './components/FileSelect'
 import Modal from './components/Modal'
-import Editor from './Editor'
 import { resizeImageFile, useClickAway } from './utils'
 import Progress from './components/Progress'
 import { downloadModel } from './adapters/cache'
@@ -18,6 +17,7 @@ import { type LanguageTag, languageTag, message, setLanguageTag } from './i18n'
 import { useTheme } from './theme'
 
 const EXAMPLE_IMAGES = ['bag', 'dog', 'car', 'bird', 'jacket', 'shoe', 'paris']
+const Editor = lazy(() => import('./Editor'))
 
 function App() {
   const [file, setFile] = useState<File>()
@@ -28,18 +28,31 @@ function App() {
   const modalRef = useRef<HTMLDivElement>(null)
 
   const [downloadProgress, setDownloadProgress] = useState(100)
+  const [modelDownloadError, setModelDownloadError] = useState<string>()
   const { theme, toggleTheme } = useTheme()
 
-  useEffect(() => {
-    downloadModel('inpaint', setDownloadProgress)
-  }, [])
+  function preloadInpaintModel() {
+    setModelDownloadError(undefined)
+    void downloadModel('inpaint', setDownloadProgress).catch(error => {
+      setDownloadProgress(100)
+      setModelDownloadError(
+        error instanceof Error ? error.message : String(error)
+      )
+    })
+  }
+
+  useEffect(preloadInpaintModel, [])
 
   useClickAway(modalRef, () => {
     setShowAbout(false)
   })
 
   async function startWithDemoImage(img: string) {
-    const imgBlob = await fetch(`/examples/${img}.jpeg`).then(r => r.blob())
+    const response = await fetch(`/examples/${img}.jpeg`)
+    if (!response.ok) {
+      throw new Error(`Failed to load example image (${response.status})`)
+    }
+    const imgBlob = await response.blob()
     setFile(new File([imgBlob], `${img}.jpeg`, { type: 'image/jpeg' }))
   }
 
@@ -115,7 +128,17 @@ function App() {
 
       <main className="relative h-[calc(100svh-4rem)] min-h-0">
         {file ? (
-          <Editor file={file} />
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center text-sm font-bold text-muted">
+                {stateLanguageTag === 'zh'
+                  ? '正在加载编辑器…'
+                  : 'Loading editor…'}
+              </div>
+            }
+          >
+            <Editor file={file} />
+          </Suspense>
         ) : (
           <section className="workspace-enter mx-auto flex h-full w-full max-w-6xl flex-col justify-center overflow-y-auto px-4 py-6 sm:px-8 sm:py-10">
             <div className="mx-auto mb-6 max-w-2xl text-center sm:mb-8">
@@ -151,7 +174,13 @@ function App() {
                   <button
                     type="button"
                     key={image}
-                    onClick={() => startWithDemoImage(image)}
+                    onClick={() => {
+                      void startWithDemoImage(image).catch(error => {
+                        alert(
+                          error instanceof Error ? error.message : String(error)
+                        )
+                      })
+                    }}
                     className="sample-button theme-control h-20 w-24 flex-none snap-center overflow-hidden rounded-2xl border border-line bg-panel shadow-sm sm:h-24 sm:w-28"
                   >
                     <img
@@ -199,6 +228,23 @@ function App() {
               {message('inpaint_model_download_message')}
             </p>
             <Progress percent={downloadProgress} />
+          </div>
+        </Modal>
+      )}
+      {modelDownloadError && (
+        <Modal>
+          <div className="space-y-5">
+            <h2 className="text-xl font-black">
+              {stateLanguageTag === 'zh'
+                ? '模型下载失败'
+                : 'Model download failed'}
+            </h2>
+            <p className="break-words text-sm leading-6 text-muted">
+              {modelDownloadError}
+            </p>
+            <Button primary onClick={preloadInpaintModel}>
+              {stateLanguageTag === 'zh' ? '重试' : 'Retry'}
+            </Button>
           </div>
         </Modal>
       )}

@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { message } from '../i18n'
 
 type FileSelectProps = {
-  onSelection: (file: File) => void
+  onSelection: (file: File) => void | Promise<void>
 }
 
 export default function FileSelect(props: FileSelectProps) {
@@ -12,7 +12,7 @@ export default function FileSelect(props: FileSelectProps) {
   const [dragHover, setDragHover] = useState(false)
   const [uploadElemId] = useState(`file-upload-${Math.random().toString()}`)
 
-  function onFileSelected(file: File) {
+  async function onFileSelected(file?: File) {
     if (!file) {
       return
     }
@@ -26,15 +26,15 @@ export default function FileSelect(props: FileSelectProps) {
       if (file.size > 10 * 1024 * 1024) {
         throw new Error('file too large')
       }
-      onSelection(file)
+      await onSelection(file)
     } catch (error) {
       alert(`error: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
   async function getFile(entry: FileSystemFileEntry): Promise<File> {
-    return new Promise(resolve => {
-      entry.file((file: File) => resolve(file))
+    return new Promise((resolve, reject) => {
+      entry.file((file: File) => resolve(file), reject)
     })
   }
 
@@ -98,9 +98,14 @@ export default function FileSelect(props: FileSelectProps) {
 
   async function handleDrop(ev: React.DragEvent) {
     ev.preventDefault()
-    const items = await getAllFileEntries(ev.dataTransfer.items)
-    setDragHover(false)
-    onFileSelected(items[0])
+    try {
+      const items = await getAllFileEntries(ev.dataTransfer.items)
+      await onFileSelected(items[0] ?? ev.dataTransfer.files[0])
+    } catch (error) {
+      alert(`error: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setDragHover(false)
+    }
   }
 
   return (
@@ -132,7 +137,7 @@ export default function FileSelect(props: FileSelectProps) {
           onChange={ev => {
             const file = ev.currentTarget.files?.[0]
             if (file) {
-              onFileSelected(file)
+              void onFileSelected(file)
             }
           }}
           accept="image/png, image/jpeg, image/webp"

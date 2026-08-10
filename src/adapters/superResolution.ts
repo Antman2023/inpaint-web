@@ -14,6 +14,15 @@ function loadImage(url: string): Promise<HTMLImageElement> {
     img.src = url
   })
 }
+
+async function loadFileImage(file: File) {
+  const objectUrl = URL.createObjectURL(file)
+  try {
+    return await loadImage(objectUrl)
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
 function imgProcess(img: Mat) {
   const channels = new cv.MatVector()
   cv.split(img, channels) // 分割通道
@@ -50,25 +59,9 @@ async function tileProc(
   const gOffset = imageW * imageH
   const bOffset = imageW * imageH * 2
 
-  const outputDims = [
-    inputDims[0],
-    inputDims[1],
-    inputDims[2] * 4,
-    inputDims[3] * 4,
-  ]
-  const outputTensor = new ort.Tensor(
-    'float32',
-    new Float32Array(
-      outputDims[0] * outputDims[1] * outputDims[2] * outputDims[3]
-    ),
-    outputDims
-  )
-
-  const outImageW = outputDims[3]
-  const outImageH = outputDims[2]
-  const outROffset = 0
-  const outGOffset = outImageW * outImageH
-  const outBOffset = outImageW * outImageH * 2
+  const outImageW = inputDims[3] * 4
+  const outImageH = inputDims[2] * 4
+  const outputData = new Uint8ClampedArray(outImageW * outImageH * 4)
 
   const tileSize = 64
   const tilePadding = 6
@@ -151,15 +144,16 @@ async function tileProc(
         for (let y = 0; y < outTileH; y++) {
           const xim = i * outTileSizePre + x
           const yim = j * outTileSizePre + y
-          const idx = xim + yim * outImageW
+          const outputIndex = (xim + yim * outImageW) * 4
           const xt = x + tilePadding * 4
           const yt = y + tilePadding * 4
-          outputTensor.data[idx + outROffset] =
-            results.output.data[xt + yt * outTileSize + outTileROffset]
-          outputTensor.data[idx + outGOffset] =
-            results.output.data[xt + yt * outTileSize + outTileGOffset]
-          outputTensor.data[idx + outBOffset] =
-            results.output.data[xt + yt * outTileSize + outTileBOffset]
+          outputData[outputIndex] =
+            results.output.data[xt + yt * outTileSize + outTileROffset] * 255
+          outputData[outputIndex + 1] =
+            results.output.data[xt + yt * outTileSize + outTileGOffset] * 255
+          outputData[outputIndex + 2] =
+            results.output.data[xt + yt * outTileSize + outTileBOffset] * 255
+          outputData[outputIndex + 3] = 255
         }
       }
       currentTile++
@@ -171,29 +165,29 @@ async function tileProc(
       callback(Math.round(100 * (currentTile / numTiles)))
     }
   }
-  console.log(`output dims:${outputTensor.dims}`)
-  return outputTensor
+  return new ImageData(outputData, outImageW, outImageH)
 }
 function processImage(
   img: HTMLImageElement,
   canvasId?: string
 ): Promise<Float32Array> {
   return new Promise((resolve, reject) => {
+    let src: Mat | undefined
+    let srcRgb: Mat | undefined
     try {
-      const src = cv.imread(img)
-      // eslint-disable-next-line camelcase
-      const src_rgb = new cv.Mat()
+      src = cv.imread(img)
+      srcRgb = new cv.Mat()
       // 将图像从RGBA转换为RGB
-      cv.cvtColor(src, src_rgb, cv.COLOR_RGBA2RGB)
+      cv.cvtColor(src, srcRgb, cv.COLOR_RGBA2RGB)
       if (canvasId) {
-        cv.imshow(canvasId, src_rgb)
+        cv.imshow(canvasId, srcRgb)
       }
-      resolve(imgProcess(src_rgb))
-
-      src.delete()
-      src_rgb.delete()
+      resolve(imgProcess(srcRgb))
     } catch (error) {
       reject(error)
+    } finally {
+      src?.delete()
+      srcRgb?.delete()
     }
   })
 }
@@ -213,30 +207,6 @@ function configEnv(capabilities: Capabilities) {
   }
   console.log('env', ort.env.wasm)
 }
-function postProcess(floatData: Float32Array, width: number, height: number) {
-  const chwToHwcData = []
-  const size = width * height
-
-  for (let h = 0; h < height; h++) {
-    for (let w = 0; w < width; w++) {
-      for (let c = 0; c < 3; c++) {
-        // RGB通道
-        const chwIndex = c * size + h * width + w
-        const pixelVal = floatData[chwIndex]
-        let newPiex = pixelVal
-        if (pixelVal > 1) {
-          newPiex = 1
-        } else if (pixelVal < 0) {
-          newPiex = 0
-        }
-        chwToHwcData.push(newPiex * 255) // 归一化反转
-      }
-      chwToHwcData.push(255) // Alpha通道
-    }
-  }
-  return chwToHwcData
-}
-
 function imageDataToDataURL(imageData: ImageData) {
   // 创建 canvas
   const canvas = document.createElement('canvas')
@@ -258,6 +228,17 @@ export default async function superResolution(
   imageFile: File | HTMLImageElement,
   callback: (progress: number) => void
 ) {
+  const img =
+    imageFile instanceof HTMLImageElement
+      ? imageFile
+      : await loadFileImage(imageFile)
+  const outputPixelCount = img.width * 4 * img.height * 4
+  if (outputPixelCount > 20_000_000) {
+    throw new Error(
+      'This image is too large for 4x upscaling in the browser. Use an image smaller than about 1.25 megapixels.'
+    )
+  }
+
   console.time('sessionCreate')
   let session = model
   if (!session) {
@@ -271,10 +252,6 @@ export default async function superResolution(
   }
   console.timeEnd('sessionCreate')
 
-  const img =
-    imageFile instanceof HTMLImageElement
-      ? imageFile
-      : await loadImage(URL.createObjectURL(imageFile))
   const imageTersorData = await processImage(img)
   const imageTensor = new ort.Tensor('float32', imageTersorData, [
     1,
@@ -283,22 +260,8 @@ export default async function superResolution(
     img.width,
   ])
 
-  const result = await tileProc(imageTensor, session, callback)
+  const imageData = await tileProc(imageTensor, session, callback)
   console.time('postProcess')
-  const outsTensor = result
-  if (!(outsTensor.data instanceof Float32Array)) {
-    throw new TypeError('Expected a float32 output tensor')
-  }
-  const chwToHwcData = postProcess(
-    outsTensor.data,
-    img.width * 4,
-    img.height * 4
-  )
-  const imageData = new ImageData(
-    new Uint8ClampedArray(chwToHwcData),
-    img.width * 4,
-    img.height * 4
-  )
   console.log(imageData, 'imageData')
   const url = imageDataToDataURL(imageData)
   console.timeEnd('postProcess')

@@ -17,6 +17,15 @@ function loadImage(url: string): Promise<HTMLImageElement> {
     img.src = url
   })
 }
+
+async function loadFileImage(file: File) {
+  const objectUrl = URL.createObjectURL(file)
+  try {
+    return await loadImage(objectUrl)
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
 function imgProcess(img: Mat) {
   const channels = new cv.MatVector()
   cv.split(img, channels) // 分割通道
@@ -68,20 +77,22 @@ function processImage(
   canvasId?: string
 ): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
+    let src: Mat | undefined
+    let srcRgb: Mat | undefined
     try {
-      const src = cv.imread(img)
-      const src_rgb = new cv.Mat()
+      src = cv.imread(img)
+      srcRgb = new cv.Mat()
       // 将图像从RGBA转换为RGB
-      cv.cvtColor(src, src_rgb, cv.COLOR_RGBA2RGB)
+      cv.cvtColor(src, srcRgb, cv.COLOR_RGBA2RGB)
       if (canvasId) {
-        cv.imshow(canvasId, src_rgb)
+        cv.imshow(canvasId, srcRgb)
       }
-      resolve(imgProcess(src_rgb))
-
-      src.delete()
-      src_rgb.delete()
+      resolve(imgProcess(srcRgb))
     } catch (error) {
       reject(error)
+    } finally {
+      src?.delete()
+      srcRgb?.delete()
     }
   })
 }
@@ -91,44 +102,41 @@ function processMark(
   canvasId?: string
 ): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
+    let src: Mat | undefined
+    let srcGrey: Mat | undefined
     try {
-      const src = cv.imread(img)
-      const src_grey = new cv.Mat()
+      src = cv.imread(img)
+      srcGrey = new cv.Mat()
 
       // 将图像从RGBA转换为二值化
-      cv.cvtColor(src, src_grey, cv.COLOR_BGR2GRAY)
+      cv.cvtColor(src, srcGrey, cv.COLOR_BGR2GRAY)
 
       if (canvasId) {
-        cv.imshow(canvasId, src_grey)
+        cv.imshow(canvasId, srcGrey)
       }
 
-      resolve(markProcess(src_grey))
-
-      src.delete()
+      resolve(markProcess(srcGrey))
     } catch (error) {
       reject(error)
+    } finally {
+      src?.delete()
+      srcGrey?.delete()
     }
   })
 }
 function postProcess(uint8Data: Uint8Array, width: number, height: number) {
-  const chwToHwcData = []
+  const chwToHwcData = new Uint8ClampedArray(width * height * 4)
   const size = width * height
 
   for (let h = 0; h < height; h++) {
     for (let w = 0; w < width; w++) {
+      const outputIndex = (h * width + w) * 4
       for (let c = 0; c < 3; c++) {
         // RGB通道
         const chwIndex = c * size + h * width + w
-        const pixelVal = uint8Data[chwIndex]
-        let newPiex = pixelVal
-        if (pixelVal > 255) {
-          newPiex = 255
-        } else if (pixelVal < 0) {
-          newPiex = 0
-        }
-        chwToHwcData.push(newPiex) // 归一化反转
+        chwToHwcData[outputIndex + c] = uint8Data[chwIndex]
       }
-      chwToHwcData.push(255) // Alpha通道
+      chwToHwcData[outputIndex + 3] = 255
     }
   }
   return chwToHwcData
@@ -218,7 +226,7 @@ export default async function inpaint(
   const [originalImg, originalMark] = await Promise.all([
     imageFile instanceof HTMLImageElement
       ? imageFile
-      : loadImage(URL.createObjectURL(imageFile)),
+      : loadFileImage(imageFile),
     loadImage(maskBase64),
   ])
 
@@ -265,7 +273,7 @@ export default async function inpaint(
     originalImg.height
   )
   const imageData = new ImageData(
-    new Uint8ClampedArray(chwToHwcData),
+    chwToHwcData,
     originalImg.width,
     originalImg.height
   )

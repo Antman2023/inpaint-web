@@ -2,8 +2,6 @@
 /* eslint-disable jsx-a11y/no-static-element-interactions */
 import { DownloadIcon, EyeIcon, ViewBoardsIcon } from '@heroicons/react/outline'
 import { useCallback, useEffect, useState, useRef, useMemo } from 'react'
-import inpaint from './adapters/inpainting'
-import superResolution from './adapters/superResolution'
 import Button from './components/Button'
 import Slider from './components/Slider'
 import { downloadImage, loadImage, useImage, useWindowSize } from './utils'
@@ -28,6 +26,7 @@ function drawLines(
   color = 'rgba(255, 0, 0, 0.5)'
 ) {
   ctx.strokeStyle = color
+  ctx.fillStyle = color
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
@@ -36,6 +35,12 @@ function drawLines(
       return
     }
     ctx.lineWidth = line.size
+    if (line.pts.length === 1) {
+      ctx.beginPath()
+      ctx.arc(line.pts[0].x, line.pts[0].y, line.size / 2, 0, Math.PI * 2)
+      ctx.fill()
+      return
+    }
     ctx.beginPath()
     ctx.moveTo(line.pts[0].x, line.pts[0].y)
     line.pts.forEach(pt => {
@@ -176,12 +181,21 @@ export default function Editor(props: EditorProps) {
     if (!canvas) {
       return
     }
-    const onMouseMove = (ev: MouseEvent) => {
+    let activePointerId: number | null = null
+
+    const updateBrushPosition = (ev: PointerEvent) => {
       if (brushRef.current) {
-        const x = ev.pageX - scaledBrushSize / 2
-        const y = ev.pageY - scaledBrushSize / 2
+        const x = ev.clientX - scaledBrushSize / 2
+        const y = ev.clientY - scaledBrushSize / 2
 
         brushRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`
+      }
+    }
+    const getCanvasPoint = (ev: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect()
+      return {
+        x: (ev.clientX - rect.left) * (canvas.width / rect.width),
+        y: (ev.clientY - rect.top) * (canvas.height / rect.height),
       }
     }
     const onPaint = (px: number, py: number) => {
@@ -189,13 +203,17 @@ export default function Editor(props: EditorProps) {
       currLine.pts.push({ x: px, y: py })
       draw()
     }
-    const onMouseDrag = (ev: MouseEvent) => {
-      const px = ev.offsetX - canvas.offsetLeft
-      const py = ev.offsetY - canvas.offsetTop
-      onPaint(px, py)
+    const onPointerMove = (ev: PointerEvent) => {
+      updateBrushPosition(ev)
+      if (activePointerId !== ev.pointerId) {
+        return
+      }
+      ev.preventDefault()
+      const point = getCanvasPoint(ev)
+      onPaint(point.x, point.y)
     }
 
-    const onPointerUp = async () => {
+    const processStroke = async () => {
       if (!original.src || showOriginal) {
         return
       }
@@ -203,14 +221,13 @@ export default function Editor(props: EditorProps) {
         return
       }
       const loading = onloading()
-      canvas.removeEventListener('mousemove', onMouseDrag)
-      canvas.removeEventListener('mouseup', onPointerUp)
-      refreshCanvasMask()
       try {
+        refreshCanvasMask()
         const start = Date.now()
         console.log('inpaint_start')
         // each time based on the last result, the first is the original
         const newFile = renders.slice(-1)[0] ?? file
+        const { default: inpaint } = await import('./adapters/inpainting')
         const res = await inpaint(newFile, maskCanvas.toDataURL())
         if (!res) {
           throw new Error('empty response')
@@ -241,50 +258,65 @@ export default function Editor(props: EditorProps) {
       loading.close()
       draw()
     }
-    canvas.addEventListener('mousemove', onMouseMove)
-
-    const onTouchMove = (ev: TouchEvent) => {
-      ev.preventDefault()
-      ev.stopPropagation()
-      const currLine = lines[lines.length - 1]
-      const coords = canvas.getBoundingClientRect()
-      currLine.pts.push({
-        x: ev.touches[0].clientX - coords.x,
-        y: ev.touches[0].clientY - coords.y,
-      })
-      draw()
-    }
-    const onPointerStart = () => {
-      if (!original.src || showOriginal) {
+    const onPointerStart = (ev: PointerEvent) => {
+      if (
+        !original.src ||
+        showOriginal ||
+        (ev.pointerType === 'mouse' && ev.button !== 0)
+      ) {
         return
       }
+      ev.preventDefault()
+      activePointerId = ev.pointerId
+      canvas.setPointerCapture(ev.pointerId)
       const currLine = lines[lines.length - 1]
       currLine.size = brushSize
-      canvas.addEventListener('mousemove', onMouseDrag)
-      canvas.addEventListener('mouseup', onPointerUp)
-      // onPaint(e)
+      const point = getCanvasPoint(ev)
+      onPaint(point.x, point.y)
+    }
+    const onPointerUp = (ev: PointerEvent) => {
+      if (activePointerId !== ev.pointerId) {
+        return
+      }
+      activePointerId = null
+      if (canvas.hasPointerCapture(ev.pointerId)) {
+        canvas.releasePointerCapture(ev.pointerId)
+      }
+      void processStroke()
+    }
+    const onPointerCancel = (ev: PointerEvent) => {
+      if (activePointerId !== ev.pointerId) {
+        return
+      }
+      activePointerId = null
+      if (canvas.hasPointerCapture(ev.pointerId)) {
+        canvas.releasePointerCapture(ev.pointerId)
+      }
+      const currLine = lines[lines.length - 1]
+      currLine.pts = []
+      draw()
     }
 
-    canvas.addEventListener('touchstart', onPointerStart)
-    canvas.addEventListener('touchmove', onTouchMove)
-    canvas.addEventListener('touchend', onPointerUp)
-    canvas.onmouseenter = () => {
+    const onPointerEnter = () => {
       window.clearTimeout(hideBrushTimeout)
-      setShowBrush(true && !showOriginal)
+      setShowBrush(!showOriginal)
     }
-    canvas.onmouseleave = () => setShowBrush(false)
-    canvas.onmousedown = onPointerStart
+    const onPointerLeave = () => setShowBrush(false)
+
+    canvas.addEventListener('pointerdown', onPointerStart)
+    canvas.addEventListener('pointermove', onPointerMove)
+    canvas.addEventListener('pointerup', onPointerUp)
+    canvas.addEventListener('pointercancel', onPointerCancel)
+    canvas.addEventListener('pointerenter', onPointerEnter)
+    canvas.addEventListener('pointerleave', onPointerLeave)
 
     return () => {
-      canvas.removeEventListener('mousemove', onMouseDrag)
-      canvas.removeEventListener('mousemove', onMouseMove)
-      canvas.removeEventListener('mouseup', onPointerUp)
-      canvas.removeEventListener('touchstart', onPointerStart)
-      canvas.removeEventListener('touchmove', onTouchMove)
-      canvas.removeEventListener('touchend', onPointerUp)
-      canvas.onmouseenter = null
-      canvas.onmouseleave = null
-      canvas.onmousedown = null
+      canvas.removeEventListener('pointerdown', onPointerStart)
+      canvas.removeEventListener('pointermove', onPointerMove)
+      canvas.removeEventListener('pointerup', onPointerUp)
+      canvas.removeEventListener('pointercancel', onPointerCancel)
+      canvas.removeEventListener('pointerenter', onPointerEnter)
+      canvas.removeEventListener('pointerleave', onPointerLeave)
     }
   }, [
     brushSize,
@@ -461,18 +493,21 @@ export default function Editor(props: EditorProps) {
   }
 
   const onSuperResolution = useCallback(async () => {
-    if (!(await modelExists('superResolution'))) {
-      setDownloaded(false)
-      await downloadModel('superResolution', setDownloadProgress)
-      setDownloaded(true)
-    }
-    setIsProcessingLoading(true)
     try {
+      if (!(await modelExists('superResolution'))) {
+        setDownloaded(false)
+        await downloadModel('superResolution', setDownloadProgress)
+      }
+      setDownloaded(true)
+      setGenerateProgress(0)
+      setIsProcessingLoading(true)
       // 运行
       const start = Date.now()
       console.log('superResolution_start')
       // each time based on the last result, the first is the original
       const newFile = renders.at(-1) ?? file
+      const { default: superResolution } =
+        await import('./adapters/superResolution')
       const res = await superResolution(newFile, setGenerateProgress)
       if (!res) {
         throw new Error('empty response')
@@ -492,7 +527,9 @@ export default function Editor(props: EditorProps) {
       // 替换当前图片
     } catch (error) {
       console.error('superResolution', error)
+      alert(error instanceof Error ? error.message : String(error))
     } finally {
+      setDownloaded(true)
       setIsProcessingLoading(false)
     }
   }, [file, lines, renders])
@@ -524,7 +561,7 @@ export default function Editor(props: EditorProps) {
       >
         <div className="relative flex items-center justify-center">
           <canvas
-            className="rounded-xl shadow-2xl shadow-black/20"
+            className="touch-none rounded-xl shadow-2xl shadow-black/20"
             style={showBrush ? { cursor: 'none' } : {}}
             ref={r => {
               if (r && !context) {
