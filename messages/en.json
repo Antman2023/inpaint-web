@@ -6,6 +6,9 @@
   "workspace_title": "Choose an image, then brush away distractions",
   "workspace_description": "Your images and AI processing stay in this browser and are never uploaded.",
   "supported_files": "JPG, PNG or WebP, up to 10 MB",
+  "invalid_file": "Choose a JPG, PNG or WebP image.",
+  "file_too_large": "The image must be no larger than 10 MB.",
+  "example_load_failed": "Failed to load the example image",
   "theme_to_dark": "Switch to dark theme",
   "theme_to_light": "Switch to light theme",
   "feedback": "Feedback",
@@ -15,6 +18,9 @@
   "upscale": "4x-upscaling",
   "download": "Download",
   "undo": "Undo",
+  "back_here": "Back here",
+  "processing": "Processing, please wait",
+  "processing_description": "Processing is running in this browser and may take a moment.",
   "inpaint_model_download_message": "Need to download a 30MB model file, please wait patiently...",
   "upscaleing_model_download_message": "Need to download a 70MB model file, please wait patiently..."
 }

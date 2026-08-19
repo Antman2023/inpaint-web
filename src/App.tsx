@@ -43,14 +43,27 @@ function App() {
 
   useEffect(preloadInpaintModel, [])
 
+  useEffect(() => {
+    document.documentElement.lang = stateLanguageTag === 'zh' ? 'zh-CN' : 'en'
+  }, [stateLanguageTag])
+
   useClickAway(modalRef, () => {
     setShowAbout(false)
   })
 
+  useEffect(() => {
+    if (!showAbout) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowAbout(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [showAbout])
+
   async function startWithDemoImage(img: string) {
     const response = await fetch(`/examples/${img}.jpeg`)
     if (!response.ok) {
-      throw new Error(`Failed to load example image (${response.status})`)
+      throw new Error(`${message('example_load_failed')} (${response.status})`)
     }
     const imgBlob = await response.blob()
     setFile(new File([imgBlob], `${img}.jpeg`, { type: 'image/jpeg' }))
@@ -197,7 +210,7 @@ function App() {
       </main>
 
       {showAbout && (
-        <Modal>
+        <Modal ariaLabel={message('feedback')}>
           <div ref={modalRef} className="space-y-4">
             <p className="text-xs font-black uppercase tracking-[0.2em] text-primary">
               Inpaint—web
@@ -222,7 +235,7 @@ function App() {
         </Modal>
       )}
       {!(downloadProgress === 100) && (
-        <Modal>
+        <Modal ariaLabel={message('inpaint_model_download_message')}>
           <div className="space-y-5">
             <p className="text-lg font-bold leading-7">
               {message('inpaint_model_download_message')}
@@ -232,7 +245,11 @@ function App() {
         </Modal>
       )}
       {modelDownloadError && (
-        <Modal>
+        <Modal
+          ariaLabel={
+            stateLanguageTag === 'zh' ? '模型下载失败' : 'Model download failed'
+          }
+        >
           <div className="space-y-5">
             <h2 className="text-xl font-black">
               {stateLanguageTag === 'zh'

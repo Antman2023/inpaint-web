@@ -6,6 +6,9 @@
   "workspace_title": "选择图片，涂抹需要移除的内容",
   "workspace_description": "图片与模型推理均在本地浏览器完成，不会上传原图。",
   "supported_files": "支持 JPG、PNG、WebP，最大 10 MB",
+  "invalid_file": "请选择 JPG、PNG 或 WebP 图片。",
+  "file_too_large": "图片不能超过 10 MB。",
+  "example_load_failed": "示例图片加载失败",
   "theme_to_dark": "切换至暗黑模式",
   "theme_to_light": "切换至明亮模式",
   "feedback": "问题反馈",
@@ -15,6 +18,9 @@
   "upscale": "4 倍放大",
   "download": "下载",
   "undo": "撤销",
+  "back_here": "回到这里",
+  "processing": "正在处理中，请耐心等待",
+  "processing_description": "处理在本地浏览器中进行，可能需要一些时间。",
   "inpaint_model_download_message": "注意需要连接国际互联网，需要下载一次30MB大小模型文件,耐心等待。。。",
   "upscaleing_model_download_message": "注意需要连接国际互联网，需要下载一次70MB大小模型文件,耐心等待。。。"
 }

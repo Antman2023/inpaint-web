@@ -1,0 +1,15 @@
+# Inpaint-web
+
+Inpaint-web is a free, open-source image inpainting and 4x upscaling tool. Image processing runs locally in the browser and source images are not uploaded.
+
+## Features
+
+- Remove unwanted image content with a brush mask.
+- Compare edits with the original image.
+- Undo or return to an earlier result.
+- Upscale supported images by 4x.
+- Download the processed image.
+
+## Source
+
+- [GitHub repository](https://github.com/Antman2023/inpaint-web)

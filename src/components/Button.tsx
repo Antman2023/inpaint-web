@@ -9,8 +9,6 @@ interface ButtonProps {
   ariaLabel?: string
   disabled?: boolean
   onClick?: () => void
-  onDown?: () => void
-  onUp?: () => void
   onEnter?: () => void
   onLeave?: () => void
 }
@@ -23,8 +21,6 @@ export default function Button(props: ButtonProps) {
     primary,
     style,
     onClick,
-    onDown,
-    onUp,
     onEnter,
     onLeave,
     ariaLabel,
@@ -49,11 +45,9 @@ export default function Button(props: ButtonProps) {
       onPointerDown={() => {
         if (disabled) return
         setActive(true)
-        onDown?.()
       }}
       onPointerUp={() => {
         setActive(false)
-        onUp?.()
       }}
       onPointerEnter={() => {
         onEnter?.()

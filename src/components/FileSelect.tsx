@@ -16,19 +16,16 @@ export default function FileSelect(props: FileSelectProps) {
     if (!file) {
       return
     }
-    // Skip non-image files
-    const isImage = file.type.match('image.*')
-    if (!isImage) {
-      return
-    }
     try {
-      // Check if file is larger than 10mb
+      if (!file.type.match('image.*')) {
+        throw new Error(message('invalid_file'))
+      }
       if (file.size > 10 * 1024 * 1024) {
-        throw new Error('file too large')
+        throw new Error(message('file_too_large'))
       }
       await onSelection(file)
     } catch (error) {
-      alert(`error: ${error instanceof Error ? error.message : String(error)}`)
+      alert(error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -102,7 +99,7 @@ export default function FileSelect(props: FileSelectProps) {
       const items = await getAllFileEntries(ev.dataTransfer.items)
       await onFileSelected(items[0] ?? ev.dataTransfer.files[0])
     } catch (error) {
-      alert(`error: ${error instanceof Error ? error.message : String(error)}`)
+      alert(error instanceof Error ? error.message : String(error))
     } finally {
       setDragHover(false)
     }
