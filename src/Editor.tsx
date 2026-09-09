@@ -12,8 +12,14 @@ import {
 } from 'react'
 import Button from './components/Button'
 import Slider from './components/Slider'
-import { downloadImage, imageFileName, loadImage, useImage } from './utils'
+import { downloadImage, imageFileName, useImage } from './utils'
+import {
+  createHistoryEntry,
+  releaseEntry,
+  type HistoryEntry,
+} from './imageResources'
 import Progress from './components/Progress'
+import { waitForAbort } from './cancellation'
 import { modelExists, downloadModel } from './adapters/cache'
 import Modal from './components/Modal'
 import { message } from './i18n'
@@ -46,14 +52,11 @@ export default function Editor(props: EditorProps) {
   }, [lifetime])
   const [brushSize, setBrushSize] = useState(40)
   const [original, isOriginalLoaded, imageError, retryImage] = useImage(file)
-  const [history, dispatchHistory] = useReducer(
-    historyReducer<HTMLImageElement>,
-    {
-      entries: [],
-      index: -1,
-    }
-  )
-  const currentRender = history.entries[history.index]
+  const [history, dispatchHistory] = useReducer(historyReducer<HistoryEntry>, {
+    entries: [],
+    index: -1,
+  })
+  const currentRender = history.entries[history.index]?.image
   const sourceImage = currentRender ?? original
   const upscalePlan = getUpscalePlan(
     sourceImage.naturalWidth,
@@ -62,9 +65,6 @@ export default function Editor(props: EditorProps) {
   const canUndo = history.index >= 0
   const canRedo = history.index < history.entries.length - 1
   const [context, setContext] = useState<CanvasRenderingContext2D>()
-  const [maskCanvas] = useState<HTMLCanvasElement>(() => {
-    return document.createElement('canvas')
-  })
   const currentLineRef = useRef<BrushStroke>(createEmptyLine())
   const brushRef = useRef<HTMLDivElement>(null)
   const [showBrush, setShowBrush] = useState(false)
@@ -79,6 +79,26 @@ export default function Editor(props: EditorProps) {
   const [generateProgress, setGenerateProgress] = useState(0)
   const [upscaleStatus, setUpscaleStatus] = useState<UpscaleStatus>()
   const processingBusy = useRef(false)
+  const operationRef = useRef<AbortController>()
+  const [cancelling, setCancelling] = useState(false)
+  const toolbarRef = useRef<HTMLFieldSetElement>(null)
+  const [ownedEntries] = useState(() => new Map<number, HistoryEntry>())
+  const nextEntryId = useRef(0)
+  useLayoutEffect(() => {
+    const retained = new Set(history.entries.map(entry => entry.id))
+    for (const [id, entry] of ownedEntries) {
+      if (!retained.has(id)) {
+        releaseEntry(entry)
+        ownedEntries.delete(id)
+      }
+    }
+  }, [history.entries, ownedEntries])
+
+  const cancelProcessing = useCallback(() => {
+    if (!operationRef.current || operationRef.current.signal.aborted) return
+    setCancelling(true)
+    operationRef.current.abort()
+  }, [])
   const modalRef = useRef(null)
   const historyListRef = useRef<HTMLDivElement>(null)
   const scaledBrushSize = brushSize
@@ -89,28 +109,66 @@ export default function Editor(props: EditorProps) {
   const mountedRef = useRef(true)
 
   const onloading = useCallback(() => {
+    const controller = new AbortController()
+    const abort = () => controller.abort(lifetime.signal.reason)
+    lifetime.signal.addEventListener('abort', abort, { once: true })
+    if (lifetime.signal.aborted) abort()
+    operationRef.current = controller
+    setCancelling(false)
+    setShowBrush(false)
     setProcessingError(undefined)
     processingBusy.current = true
     setIsProcessingLoading(true)
     setInpaintStage('processing_model')
     return {
+      signal: controller.signal,
       close: () => {
+        lifetime.signal.removeEventListener('abort', abort)
+        operationRef.current = undefined
         processingBusy.current = false
+        if (controller.signal.aborted)
+          currentLineRef.current = createEmptyLine()
         if (mountedRef.current) {
+          setCancelling(false)
           setInpaintStage(null)
           setIsProcessingLoading(false)
+          if (controller.signal.aborted)
+            window.requestAnimationFrame(() => {
+              if (mountedRef.current)
+                toolbarRef.current?.focus({ preventScroll: true })
+            })
         }
       },
     }
-  }, [])
+  }, [lifetime])
+
+  const commitResult = useCallback(
+    async (blob: Blob, signal: AbortSignal) => {
+      const entry = await createHistoryEntry(
+        blob,
+        ++nextEntryId.current,
+        signal
+      )
+      if (!mountedRef.current || signal.aborted) {
+        releaseEntry(entry)
+        return
+      }
+      ownedEntries.set(entry.id, entry)
+      currentLineRef.current = createEmptyLine()
+      dispatchHistory({ type: 'append', entry, sizeOf: item => item.bytes })
+    },
+    [ownedEntries]
+  )
 
   useLayoutEffect(
     () => () => {
       mountedRef.current = false
       lifetime.abort()
+      for (const entry of ownedEntries.values()) releaseEntry(entry)
+      ownedEntries.clear()
       window.clearTimeout(hideBrushTimeoutRef.current)
     },
-    [lifetime]
+    [lifetime, ownedEntries]
   )
 
   const draw = useCallback(
@@ -119,15 +177,22 @@ export default function Editor(props: EditorProps) {
         return
       }
       context.clearRect(0, 0, context.canvas.width, context.canvas.height)
-      const currRender = history.entries[index] ?? original
+      const currRender = history.entries[index]?.image ?? original
       const { canvas } = context
 
       const canvasContainer = canvasDiv.current
       if (!canvasContainer) {
         return
       }
-      const divWidth = canvasContainer.offsetWidth
-      const divHeight = canvasContainer.offsetHeight
+      const padding = getComputedStyle(canvasContainer)
+      const divWidth =
+        canvasContainer.clientWidth -
+        parseFloat(padding.paddingLeft) -
+        parseFloat(padding.paddingRight)
+      const divHeight =
+        canvasContainer.clientHeight -
+        parseFloat(padding.paddingTop) -
+        parseFloat(padding.paddingBottom)
       if (!currRender.width || !currRender.height || !divWidth || !divHeight) {
         return
       }
@@ -166,17 +231,26 @@ export default function Editor(props: EditorProps) {
   )
 
   const refreshCanvasMask = useCallback(() => {
-    if (!context?.canvas.width || !context?.canvas.height) {
+    if (!context?.canvas.width || !context.canvas.height)
       throw new Error('canvas has invalid size')
+    const snapshot = document.createElement('canvas')
+    try {
+      snapshot.width = context.canvas.width
+      snapshot.height = context.canvas.height
+      const ctx = snapshot.getContext('2d')
+      if (!ctx) throw new Error('could not retrieve mask canvas')
+      drawStroke(ctx, currentLineRef.current, 'white')
+      return snapshot
+    } catch (error) {
+      snapshot.width = 0
+      snapshot.height = 0
+      throw error
     }
-    maskCanvas.width = context?.canvas.width
-    maskCanvas.height = context?.canvas.height
-    const ctx = maskCanvas.getContext('2d')
-    if (!ctx) {
-      throw new Error('could not retrieve mask canvas')
-    }
-    drawStroke(ctx, currentLineRef.current, 'white')
-  }, [context, maskCanvas])
+  }, [context])
+
+  useEffect(() => {
+    if (!isInpaintingLoading) draw()
+  }, [isInpaintingLoading, draw])
 
   // Toolbars and translated labels can resize the workspace without a window
   // resize. Observe the actual container and batch redraws into one frame.
@@ -255,34 +329,35 @@ export default function Editor(props: EditorProps) {
       }
       const stroke = currentLineRef.current
       const loading = onloading()
+      let snapshot: HTMLCanvasElement | undefined
       try {
-        refreshCanvasMask()
+        snapshot = refreshCanvasMask()
         const start = Date.now()
         console.log('inpaint_start')
         // each time based on the last result, the first is the original
-        const newFile = currentRender ?? file
-        const { default: inpaint } = await import('./adapters/inpainting')
+        const newFile = currentRender ?? original
+        const { default: inpaint } = await waitForAbort(
+          import('./adapters/inpainting'),
+          loading.signal
+        )
         const res = await inpaint(
           newFile,
-          maskCanvas.toDataURL(),
+          snapshot,
           stage => {
-            if (mountedRef.current) setInpaintStage(stage)
+            if (mountedRef.current && !loading.signal.aborted)
+              setInpaintStage(stage)
           },
-          lifetime.signal
+          loading.signal
         )
         if (!res) {
           throw new Error('empty response')
         }
-        const newRender = new Image()
-        newRender.dataset.id = Date.now().toString()
-        await loadImage(newRender, res, lifetime.signal)
-        if (!mountedRef.current) return
-        currentLineRef.current = createEmptyLine()
-        dispatchHistory({ type: 'append', entry: newRender })
+        await commitResult(res, loading.signal)
         console.log('inpaint_processed', {
           duration: Date.now() - start,
         })
       } catch (error) {
+        if (loading.signal.aborted) return
         console.log('inpaint_failed', {
           error,
         })
@@ -299,6 +374,10 @@ export default function Editor(props: EditorProps) {
           })
         }
       } finally {
+        if (snapshot) {
+          snapshot.width = 0
+          snapshot.height = 0
+        }
         loading.close()
       }
     }
@@ -397,16 +476,15 @@ export default function Editor(props: EditorProps) {
   }, [
     brushSize,
     context,
-    file,
     draw,
     refreshCanvasMask,
-    maskCanvas,
     isOriginalLoaded,
     currentRender,
     showOriginal,
     onloading,
     scaledBrushSize,
-    lifetime,
+    original,
+    commitResult,
   ])
 
   useEffect(() => {
@@ -505,7 +583,7 @@ export default function Editor(props: EditorProps) {
       history.entries.map((render, index) => {
         return (
           <div
-            key={render.dataset.id}
+            key={render.id}
             className={
               index === history.index ? 'rounded-sm ring-2 ring-primary' : ''
             }
@@ -516,16 +594,17 @@ export default function Editor(props: EditorProps) {
             }}
           >
             <img
-              src={render.src}
-              alt={`${historyStepLabel} ${index + 1}`}
-              className="rounded-sm"
+              src={render.thumbnail}
+              alt={`${historyStepLabel} ${render.id}`}
+              className="rounded-sm object-contain"
               style={{
+                width: '112px',
                 height: '90px',
               }}
             />
             <Button
               disabled={isInpaintingLoading}
-              ariaLabel={`${backHereLabel} ${index + 1}`}
+              ariaLabel={`${backHereLabel} ${render.id}`}
               ariaPressed={index === history.index}
               className="cursor-pointer rounded-sm opacity-100 sm:opacity-0 sm:hover:opacity-100 sm:focus-visible:opacity-100"
               style={{
@@ -593,20 +672,27 @@ export default function Editor(props: EditorProps) {
     const source = currentRender ?? original
     const plan = getUpscalePlan(source.naturalWidth, source.naturalHeight)
     if (!plan.ok) return
-    processingBusy.current = true
-    setProcessingError(undefined)
+    const loading = onloading()
     setInpaintStage(null)
     setUpscaleStatus({ stage: 'processing_model' })
     setGenerateProgress(0)
     setIsProcessingLoading(true)
     try {
-      if (!(await modelExists('superResolution'))) {
+      if (
+        !(await waitForAbort(modelExists('superResolution'), loading.signal))
+      ) {
         if (!mountedRef.current) return
         setDownloaded(false)
-        await downloadModel('superResolution', progress => {
-          if (mountedRef.current) setDownloadProgress(progress)
-        })
+        await downloadModel(
+          'superResolution',
+          progress => {
+            if (mountedRef.current && !loading.signal.aborted)
+              setDownloadProgress(progress)
+          },
+          loading.signal
+        )
       }
+      loading.signal.throwIfAborted()
       if (!mountedRef.current) return
       setDownloaded(true)
       setGenerateProgress(0)
@@ -615,34 +701,34 @@ export default function Editor(props: EditorProps) {
       const start = Date.now()
       console.log('superResolution_start')
       // each time based on the last result, the first is the original
-      const newFile = currentRender ?? file
-      const { default: superResolution } =
-        await import('./adapters/superResolution')
+      const newFile = source
+      const { default: superResolution } = await waitForAbort(
+        import('./adapters/superResolution'),
+        loading.signal
+      )
       const res = await superResolution(
         newFile,
         progress => {
-          if (mountedRef.current) setGenerateProgress(progress)
+          if (mountedRef.current && !loading.signal.aborted)
+            setGenerateProgress(progress)
         },
         status => {
-          if (mountedRef.current) setUpscaleStatus(status)
+          if (mountedRef.current && !loading.signal.aborted)
+            setUpscaleStatus(status)
         },
-        lifetime.signal
+        loading.signal
       )
       if (!res) {
         throw new Error('empty response')
       }
-      const newRender = new Image()
-      newRender.dataset.id = Date.now().toString()
-      await loadImage(newRender, res, lifetime.signal)
-      if (!mountedRef.current) return
-      currentLineRef.current = createEmptyLine()
-      dispatchHistory({ type: 'append', entry: newRender })
+      await commitResult(res, loading.signal)
       console.log('superResolution_processed', {
         duration: Date.now() - start,
       })
 
       // 替换当前图片
     } catch (error) {
+      if (loading.signal.aborted) return
       console.error('superResolution', error)
       if (mountedRef.current) {
         setProcessingError({
@@ -651,23 +737,30 @@ export default function Editor(props: EditorProps) {
         })
       }
     } finally {
-      processingBusy.current = false
+      loading.close()
       if (mountedRef.current) {
         setUpscaleStatus(undefined)
         setDownloaded(true)
         setIsProcessingLoading(false)
       }
     }
-  }, [file, currentRender, original, isOriginalLoaded, lifetime])
+  }, [currentRender, original, isOriginalLoaded, onloading, commitResult])
 
   return (
     <div
       aria-busy={isInpaintingLoading || (!isOriginalLoaded && !imageError)}
       className={[
-        'editor-shell theme-surface flex h-full min-h-0 flex-col items-center overflow-hidden bg-canvas px-3 sm:px-6',
-        isInpaintingLoading ? 'pointer-events-none' : '',
+        'editor-shell theme-surface flex h-full min-h-0 flex-col items-center overflow-y-auto bg-canvas px-3 sm:px-6',
       ].join(' ')}
     >
+      {!!history.evicted && (
+        <p
+          role="status"
+          className="mt-2 max-w-5xl text-center text-xs text-muted"
+        >
+          {message('history_trimmed')}
+        </p>
+      )}
       {/* History */}
       {history.entries.length > 0 && (
         <div
@@ -682,7 +775,7 @@ export default function Editor(props: EditorProps) {
       {/* 画图 */}
       <div
         className={[
-          'relative flex min-h-0 w-full max-w-[min(92vw,90rem)] flex-1 items-center justify-center py-3',
+          'relative flex min-h-64 w-full max-w-[min(92vw,90rem)] flex-1 shrink-0 items-center justify-center py-3',
         ].join(' ')}
         ref={canvasDiv}
       >
@@ -712,42 +805,47 @@ export default function Editor(props: EditorProps) {
             }}
           />
           {showOriginal && <ImageComparison source={original.src} />}
-          {isInpaintingLoading && (
-            <div className="theme-surface absolute inset-0 z-10 flex h-full w-full items-center justify-center rounded-xl bg-panel/90 backdrop-blur-sm">
-              <div
-                ref={modalRef}
-                className="w-4/5 space-y-4 text-center sm:w-1/2"
-              >
-                <p className="text-lg font-black">{message('processing')}</p>
-                <p className="text-sm text-muted">
-                  {message('processing_description')}
-                </p>
-                {inpaintStage ? (
-                  <p role="status" className="text-sm text-muted">
-                    {message(inpaintStage)}
-                  </p>
-                ) : (
-                  <>
-                    <p role="status" className="text-sm text-muted">
-                      {upscaleStatus?.stage
-                        ? message(upscaleStatus.stage)
-                        : `${message('upscale_tile')} ${upscaleStatus?.tile ?? 1} / ${upscaleStatus?.total ?? 1}`}
-                    </p>
-                    {!upscaleStatus?.stage && (
-                      <Progress
-                        percent={generateProgress}
-                        label={message('upscale')}
-                      />
-                    )}
-                    <p className="text-xs text-muted">
-                      {message('upscale_wait')}
-                    </p>
-                  </>
-                )}
-              </div>
-            </div>
-          )}
         </div>
+        {isInpaintingLoading && (
+          <div className="theme-surface absolute inset-0 z-10 flex h-full w-full items-center justify-center rounded-xl bg-panel/90 backdrop-blur-sm">
+            <div
+              ref={modalRef}
+              className="w-4/5 space-y-4 text-center sm:w-1/2"
+            >
+              <p className="text-lg font-black" role="status">
+                {message(cancelling ? 'processing_cancelling' : 'processing')}
+              </p>
+              <p className="text-sm text-muted">
+                {message('processing_description')}
+              </p>
+              {cancelling ? null : inpaintStage ? (
+                <p role="status" className="text-sm text-muted">
+                  {message(inpaintStage)}
+                </p>
+              ) : (
+                <>
+                  <p role="status" className="text-sm text-muted">
+                    {upscaleStatus?.stage
+                      ? message(upscaleStatus.stage)
+                      : `${message('upscale_tile')} ${upscaleStatus?.tile ?? 1} / ${upscaleStatus?.total ?? 1}`}
+                  </p>
+                  {!upscaleStatus?.stage && (
+                    <Progress
+                      percent={generateProgress}
+                      label={message('upscale')}
+                    />
+                  )}
+                  <p className="text-xs text-muted">
+                    {message('upscale_wait')}
+                  </p>
+                </>
+              )}
+              <Button disabled={cancelling} onClick={cancelProcessing}>
+                {message('cancel_processing')}
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       {!downloaded && (
@@ -760,6 +858,11 @@ export default function Editor(props: EditorProps) {
               percent={downloadProgress}
               label={message('upscaleing_model_download_message')}
             />
+            <Button disabled={cancelling} onClick={cancelProcessing}>
+              {message(
+                cancelling ? 'processing_cancelling' : 'cancel_processing'
+              )}
+            </Button>
           </div>
         </Modal>
       )}
@@ -788,6 +891,8 @@ export default function Editor(props: EditorProps) {
         </p>
       )}
       <fieldset
+        ref={toolbarRef}
+        tabIndex={-1}
         disabled={isInpaintingLoading || !isOriginalLoaded}
         aria-label={message('editor_tools')}
         className={[

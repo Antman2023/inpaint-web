@@ -1,3 +1,4 @@
+import { waitForAbort } from '../cancellation'
 import localforage from 'localforage'
 
 export type modelType = 'inpaint' | 'superResolution'
@@ -103,8 +104,10 @@ const pendingDownloads = new Map<
 
 export async function downloadModel(
   modelType: modelType,
-  setDownloadProgress: ProgressListener
+  setDownloadProgress: ProgressListener,
+  signal?: AbortSignal
 ) {
+  signal?.throwIfAborted()
   let pending = pendingDownloads.get(modelType)
   if (!pending) {
     const task = {
@@ -122,7 +125,7 @@ export async function downloadModel(
   pending.listeners.add(setDownloadProgress)
   try {
     notifyProgress(setDownloadProgress, pending.progress)
-    await pending.promise
+    await waitForAbort(pending.promise, signal)
   } finally {
     pending.listeners.delete(setDownloadProgress)
   }

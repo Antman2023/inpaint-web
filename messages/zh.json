@@ -58,7 +58,9 @@
   "repair_close": "关闭",
   "processing_runtime": "正在准备运行组件…",
   "processing_initializing": "正在初始化推理引擎，首次使用可能较慢…",
-  "processing_opencv": "正在初始化图片处理组件…",
   "upscale_tile": "正在放大分块",
-  "upscale_wait": "首次初始化及每个分块计算可能较慢；百分比会在分块完成后更新。"
+  "upscale_wait": "首次初始化及每个分块计算可能较慢；百分比会在分块完成后更新。",
+  "cancel_processing": "取消本次处理",
+  "processing_cancelling": "正在取消，等待当前计算结束…",
+  "history_trimmed": "为节省内存，较早的编辑步骤已释放。仍可撤销到保留的步骤或原图。"
 }

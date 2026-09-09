@@ -1,7 +1,6 @@
-import { loadImage as decodeImage } from '../utils'
+import { imageDataToBlob, withImage } from '../imageResources'
 /* eslint-disable no-console */
 /* eslint-disable no-plusplus */
-import { ensureOpenCV } from './opencv'
 import { readRGB } from './preprocess'
 import type { InferenceSession, Tensor } from 'onnxruntime-web'
 import { getSession, withRuntime, type SessionStage } from './runtime'
@@ -9,37 +8,21 @@ import { getUpscalePlan } from '../imageSize'
 import { message } from '../i18n'
 
 export type UpscaleStage =
-  | SessionStage
-  | 'processing_opencv'
-  | 'processing_prepare'
-  | 'processing_output'
+  SessionStage | 'processing_prepare' | 'processing_output'
 export interface UpscaleStatus {
   stage?: UpscaleStage
   tile?: number
   total?: number
 }
 
-async function loadImage(url: string): Promise<HTMLImageElement> {
-  const image = new Image()
-  image.crossOrigin = 'Anonymous'
-  await decodeImage(image, url)
-  return image
-}
-
-async function loadFileImage(file: File) {
-  const objectUrl = URL.createObjectURL(file)
-  try {
-    return await loadImage(objectUrl)
-  } finally {
-    URL.revokeObjectURL(objectUrl)
-  }
-}
 export async function tileProc(
   inputTensor: Tensor,
   session: InferenceSession,
   callback: (progress: number) => void,
-  onStatus?: (status: UpscaleStatus) => void
+  onStatus?: (status: UpscaleStatus) => void,
+  signal?: AbortSignal
 ) {
+  signal?.throwIfAborted()
   const inputDims = inputTensor.dims
   const imageW = inputDims[3]
   const imageH = inputDims[2]
@@ -85,9 +68,11 @@ export async function tileProc(
 
   for (let i = 0; i < tilesx; i++) {
     for (let j = 0; j < tilesy; j++) {
+      signal?.throwIfAborted()
       onStatus?.({ tile: currentTile + 1, total: numTiles })
       // WASM inference can occupy the main thread. Paint status before each tile.
       await new Promise(resolve => setTimeout(resolve, 16))
+      signal?.throwIfAborted()
       const tileW = Math.min(tileSizePre, imageW - i * tileSizePre)
       const tileH = Math.min(tileSizePre, imageH - j * tileSizePre)
       const tileROffset = 0
@@ -126,6 +111,7 @@ export async function tileProc(
         tileSize,
       ])
       const r = await session.run({ [session.inputNames[0]]: tile })
+      signal?.throwIfAborted()
       const results = {
         output: r[session.outputNames[0]],
       }
@@ -171,68 +157,45 @@ export async function tileProc(
       callback(Math.round(100 * (currentTile / numTiles)))
     }
   }
+  signal?.throwIfAborted()
   return new ImageData(outputData, outImageW, outImageH)
 }
-function imageDataToDataURL(imageData: ImageData) {
-  // 创建 canvas
-  const canvas = document.createElement('canvas')
-  canvas.width = imageData.width
-  canvas.height = imageData.height
-
-  try {
-    const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('Unable to get canvas context')
-    ctx.putImageData(imageData, 0, 0)
-    return canvas.toDataURL()
-  } finally {
-    canvas.width = 0
-    canvas.height = 0
-  }
-}
-async function superResolution(
-  imageFile: File | HTMLImageElement,
-  callback: (progress: number) => void,
-  onStatus?: (status: UpscaleStatus) => void
-) {
-  const img =
-    imageFile instanceof HTMLImageElement
-      ? imageFile
-      : await loadFileImage(imageFile)
-  const plan = getUpscalePlan(img.naturalWidth, img.naturalHeight)
-  if (!plan.ok) throw new Error(message(plan.reason))
-
-  console.time('sessionCreate')
-  const [session] = await Promise.all([
-    getSession('superResolution', stage => onStatus?.({ stage })),
-    ensureOpenCV(),
-  ])
-  console.timeEnd('sessionCreate')
-
-  onStatus?.({ stage: 'processing_prepare' })
-  const imageTensorData = readRGB(img, true)
-  const imageTensor = new ort.Tensor('float32', imageTensorData, [
-    1,
-    3,
-    img.naturalHeight,
-    img.naturalWidth,
-  ])
-
-  const imageData = await tileProc(imageTensor, session, callback, onStatus)
-  onStatus?.({ stage: 'processing_output' })
-  console.time('postProcess')
-  const url = imageDataToDataURL(imageData)
-  console.timeEnd('postProcess')
-
-  return url
-}
-
 export default function run(
-  imageFile: File | HTMLImageElement,
+  source: File | HTMLImageElement,
   callback: (progress: number) => void,
   onStatus?: (status: UpscaleStatus) => void,
   signal?: AbortSignal
-) {
-  return withRuntime(async () => {
-    return superResolution(imageFile, callback, onStatus)
-  }, signal)
+): Promise<Blob> {
+  return withRuntime(
+    () =>
+      withImage(source, signal, async image => {
+        const { naturalWidth: width, naturalHeight: height } = image
+        const plan = getUpscalePlan(width, height)
+        if (!plan.ok) throw new Error(message(plan.reason))
+        const session = await getSession(
+          'superResolution',
+          stage => onStatus?.({ stage }),
+          signal
+        )
+        signal?.throwIfAborted()
+        onStatus?.({ stage: 'processing_prepare' })
+        const input = new ort.Tensor('float32', readRGB(image, true), [
+          1,
+          3,
+          height,
+          width,
+        ])
+        const result = await tileProc(
+          input,
+          session,
+          callback,
+          onStatus,
+          signal
+        )
+        signal?.throwIfAborted()
+        onStatus?.({ stage: 'processing_output' })
+        return imageDataToBlob(result, signal)
+      }),
+    signal
+  )
 }

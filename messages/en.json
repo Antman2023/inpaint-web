@@ -58,7 +58,9 @@
   "repair_close": "Close",
   "processing_runtime": "Preparing runtime…",
   "processing_initializing": "Initializing inference engine; first use may take longer…",
-  "processing_opencv": "Initializing image processing…",
   "upscale_tile": "Upscaling tile",
-  "upscale_wait": "First initialization and each tile may take time. Progress updates after each tile completes."
+  "upscale_wait": "First initialization and each tile may take time. Progress updates after each tile completes.",
+  "cancel_processing": "Cancel processing",
+  "processing_cancelling": "Cancelling, waiting for the current computation…",
+  "history_trimmed": "Earlier edits were released to save memory. You can still undo to retained steps or the original."
 }

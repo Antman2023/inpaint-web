@@ -57,7 +57,7 @@ function App() {
 
   return (
     <div className="app-shell theme-surface flex min-h-full flex-col bg-canvas text-ink">
-      <header className="app-header theme-surface z-30 grid h-16 flex-none grid-cols-[1fr_auto_1fr] items-center border-b border-line bg-panel/90 px-2 backdrop-blur-xl sm:px-4">
+      <header className="app-header theme-surface z-30 grid h-16 flex-none grid-cols-[auto_minmax(0,1fr)_auto] sm:grid-cols-[1fr_auto_1fr] items-center border-b border-line bg-panel/90 px-2 backdrop-blur-xl sm:px-4">
         <div className="flex min-w-0 justify-start">
           <Button
             disabled={imageImport.status === 'idle'}
@@ -73,7 +73,7 @@ function App() {
         <button
           type="button"
           onClick={importer.cancel}
-          className="theme-control rounded-lg px-2 text-xl font-black tracking-[-0.04em] text-ink sm:text-2xl"
+          className="theme-control min-w-0 justify-self-center whitespace-nowrap rounded-lg px-1 text-lg font-black tracking-[-0.04em] text-ink sm:px-2 sm:text-2xl"
         >
           Inpaint<span className="text-primary">—web</span>
         </button>

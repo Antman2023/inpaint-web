@@ -1,3 +1,4 @@
+import { waitForAbort } from '../cancellation'
 import type { InferenceSession } from 'onnxruntime-web'
 import {
   downloadModel,
@@ -55,33 +56,58 @@ export async function withRuntime<T>(
   // Editors can unmount while inference is still running. Serialize all callers
   // and count queued work immediately so repair cannot release their sessions.
   active++
-  const task = operationQueue.then(() => {
-    signal?.throwIfAborted()
-    return operation()
-  })
+  let started = false
+  let counted = true
+  const finish = () => {
+    if (counted) {
+      counted = false
+      active--
+    }
+  }
+  const task = operationQueue
+    .then(() => {
+      started = true
+      signal?.throwIfAborted()
+      return operation()
+    })
+    .finally(finish)
   operationQueue = task.then(
     () => {},
     () => {}
   )
-  try {
-    return await task
-  } finally {
-    active--
-  }
+  // Queued callers can leave immediately; active inference retains the lock.
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      if (!started) {
+        finish()
+        reject(signal?.reason)
+      }
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    task
+      .then(resolve, reject)
+      .finally(() => signal?.removeEventListener('abort', abort))
+    if (signal?.aborted) abort()
+  })
 }
 
 export function getSession(
   type: modelType,
-  onStage?: (stage: SessionStage) => void
+  onStage?: (stage: SessionStage) => void,
+  signal?: AbortSignal
 ) {
+  if (signal?.aborted) return Promise.reject(signal.reason)
   const error = runtimeAccessError()
-  return error ? Promise.reject(error) : initializeSession(type, onStage)
+  return error
+    ? Promise.reject(error)
+    : initializeSession(type, onStage, signal)
 }
 
 // Repair owns initialization while external access is blocked.
 function initializeSession(
   type: modelType,
-  onStage?: (stage: SessionStage) => void
+  onStage?: (stage: SessionStage) => void,
+  signal?: AbortSignal
 ) {
   let session = sessions.get(type)
   if (!session) {
@@ -123,20 +149,19 @@ function initializeSession(
       })
     sessions.set(type, session)
   }
-  if (!onStage) return session
+  if (!onStage) return waitForAbort(session, signal)
   const subscribers = listeners.get(type) ?? new Set()
   listeners.set(type, subscribers)
   subscribers.add(onStage)
   notify(onStage, stages.get(type) ?? 'processing_runtime')
-  return session.finally(() => subscribers.delete(onStage))
+  return waitForAbort(session, signal).finally(() =>
+    subscribers.delete(onStage)
+  )
 }
 
 export function warmupInpaint(signal?: AbortSignal) {
   return withRuntime(async () => {
-    await Promise.all([
-      getSession('inpaint'),
-      import('./opencv').then(module => module.ensureOpenCV()),
-    ])
+    await getSession('inpaint', undefined, signal)
   }, signal)
 }
 
@@ -158,8 +183,6 @@ export function repairRuntime(
           '浏览器不支持 WebAssembly，请更新浏览器后重试。 / WebAssembly is unavailable; update your browser.'
         )
       notify(onProgress, 0)
-      const { ensureOpenCV } = await import('./opencv')
-      await ensureOpenCV()
       const types: modelType[] = ['inpaint']
       if (
         sessions.has('superResolution') ||

@@ -1,44 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
 
-export function useWindowSize() {
-  const [size, setSize] = useState(() => ({
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }))
-
-  useEffect(() => {
-    const handleResize = () => {
-      setSize({ width: window.innerWidth, height: window.innerHeight })
-    }
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [])
-
-  return size
-}
-
-export function dataURItoBlob(dataURI: string) {
-  const mime = dataURI.split(',')[0].split(':')[1].split(';')[0]
-  const binary = atob(dataURI.split(',')[1])
-  const array = []
-  for (let i = 0; i < binary.length; i += 1) {
-    array.push(binary.charCodeAt(i))
-  }
-  return new Blob([new Uint8Array(array)], { type: mime })
-}
-
-// const dataURItoBlob = (dataURI: string) => {
-//   const bytes =
-//     dataURI.split(',')[0].indexOf('base64') >= 0
-//       ? atob(dataURI.split(',')[1])
-//       : unescape(dataURI.split(',')[1])
-//   const mime = dataURI.split(',')[0].split(':')[1].split(';')[0]
-//   const max = bytes.length
-//   const ia = new Uint8Array(max)
-//   for (var i = 0; i < max; i++) ia[i] = bytes.charCodeAt(i)
-//   return new Blob([ia], { type: mime })
-// }
-
 export function imageFileName(name: string, mime: string, edited = false) {
   const extension = {
     'image/png': 'png',

@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict')
 const { readFileSync } = require('node:fs')
-const { resolve } = require('node:path')
+const { resolve, dirname } = require('node:path')
 const { test } = require('node:test')
 const ts = require('typescript')
 
@@ -22,7 +22,14 @@ function loadModule(path, dependencies = {}, globals = {}) {
     ...Object.keys(globals),
     outputText
   )(
-    name => dependencies[name] ?? require(name),
+    name => {
+      if (name in dependencies) return dependencies[name]
+      if (name.startsWith('.')) {
+        const target = resolve(__dirname, '..', dirname(path), name)
+        return loadModule(target + '.ts', dependencies, globals)
+      }
+      return require(name)
+    },
     module,
     module.exports,
     ...Object.values(globals)
@@ -824,7 +831,6 @@ function runtimeHarness({
   const runtime = loadModule(
     'src/adapters/runtime.ts',
     {
-      './opencv': { ensureOpenCV: async () => {} },
       './cache': {
         modelExists: async () => cachedUpscale,
         ensureModel: async type => type,
@@ -1027,22 +1033,32 @@ test('runtime serializes work across callers and blocks repair until the queue d
   let finishSecond
   const first = runtime.withRuntime(async () => {
     order.push('first starts')
-    await new Promise(resolve => { finishFirst = resolve })
+    await new Promise(resolve => {
+      finishFirst = resolve
+    })
     order.push('first finishes')
     return 'first result'
   })
   const second = runtime.withRuntime(async () => {
     order.push('second starts')
-    await new Promise(resolve => { finishSecond = resolve })
+    await new Promise(resolve => {
+      finishSecond = resolve
+    })
     order.push('second finishes')
     return 'second result'
   })
-  await assert.rejects(runtime.repairRuntime(() => {}), /Wait for image processing/)
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
   assert.deepEqual(order, ['first starts'])
   assert.deepEqual(events, [])
   finishFirst()
   assert.equal(await first, 'first result')
-  await assert.rejects(runtime.repairRuntime(() => {}), /Wait for image processing/)
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
   assert.deepEqual(order, ['first starts', 'first finishes', 'second starts'])
   finishSecond()
   assert.equal(await second, 'second result')
@@ -1058,18 +1074,28 @@ test('closing an editor skips its queued work without interrupting active infere
   let finish
   const active = runtime.withRuntime(async () => {
     order.push('active')
-    await new Promise(resolve => { finish = resolve })
+    await new Promise(resolve => {
+      finish = resolve
+    })
     order.push('finished')
   }, activeController.signal)
   const queued = runtime.withRuntime(async () => {
     order.push('cancelled task ran')
   }, queuedController.signal)
-  const cancelled = assert.rejects(queued, error => error === queuedController.signal.reason)
-  const next = runtime.withRuntime(async () => { order.push('new editor') })
+  const cancelled = assert.rejects(
+    queued,
+    error => error === queuedController.signal.reason
+  )
+  const next = runtime.withRuntime(async () => {
+    order.push('new editor')
+  })
   await Promise.resolve()
   activeController.abort()
   queuedController.abort()
-  await assert.rejects(runtime.repairRuntime(() => {}), /Wait for image processing/)
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
   assert.deepEqual(order, ['active'])
   finish()
   await Promise.all([active, cancelled, next])
@@ -1082,7 +1108,10 @@ test('an already closed editor cannot enqueue work or prevent runtime repair', a
   const controller = new AbortController()
   controller.abort()
   await assert.rejects(
-    runtime.withRuntime(async () => assert.fail('cancelled operation ran'), controller.signal),
+    runtime.withRuntime(
+      async () => assert.fail('cancelled operation ran'),
+      controller.signal
+    ),
     error => error === controller.signal.reason
   )
   await runtime.repairRuntime(() => {})
@@ -1386,92 +1415,6 @@ test('synchronous script insertion failure clears timers and permits retry', asy
   }
 })
 
-test('OpenCV callers wait for delayed WASM initialization without assimilating its thenable', async () => {
-  let checked = 0
-  let deleted = 0
-  let assimilated = false
-  const cv = {
-    then: () => {
-      assimilated = true
-    },
-  }
-  const { ensureOpenCV } = loadModule('src/adapters/opencv.ts', {
-    'opencv-ts': cv,
-  })
-  const first = ensureOpenCV()
-  assert.equal(ensureOpenCV(), first)
-  setTimeout(() => {
-    cv.Mat = class {
-      constructor() {
-        checked++
-      }
-      delete() {
-        deleted++
-      }
-    }
-    cv.MatVector = class {}
-  }, 5)
-  assert.equal(checked, 0)
-  assert.equal(await first, undefined)
-  assert.equal(checked, 1)
-  assert.equal(deleted, 1)
-  assert.equal(assimilated, false)
-})
-
-test('OpenCV initialization times out and can retry once the module becomes ready', async () => {
-  const cv = {}
-  let time = 0
-  const { ensureOpenCV } = loadModule(
-    'src/adapters/opencv.ts',
-    { 'opencv-ts': cv },
-    {
-      Date: { now: () => time },
-      setTimeout: callback => {
-        time += 30_000
-        queueMicrotask(callback)
-      },
-    }
-  )
-  await assert.rejects(ensureOpenCV(), /OpenCV initialization timed out/)
-  cv.Mat = class {
-    delete() {}
-  }
-  cv.MatVector = class {}
-  await ensureOpenCV()
-})
-
-test('OpenCV readiness propagates allocation failures and permits retry', async () => {
-  const cv = {
-    Mat: class {
-      constructor() {
-        throw new Error('WASM aborted')
-      }
-    },
-    MatVector: class {},
-  }
-  const { ensureOpenCV } = loadModule('src/adapters/opencv.ts', {
-    'opencv-ts': cv,
-  })
-  await assert.rejects(ensureOpenCV(), /WASM aborted/)
-  cv.Mat = class {
-    delete() {}
-  }
-  await ensureOpenCV()
-})
-
-test('installed OpenCV initializes and allocates a real WASM matrix', async () => {
-  const { ensureOpenCV, default: cv } = loadModule('src/adapters/opencv.ts')
-  await ensureOpenCV()
-  const mat = new cv.Mat(2, 3, cv.CV_8UC1)
-  try {
-    assert.equal(mat.rows, 2)
-    assert.equal(mat.cols, 3)
-    assert.equal(mat.data.length, 6)
-  } finally {
-    mat.delete()
-  }
-})
-
 test('editor warmup and first inference share a single session initialization', async () => {
   const { runtime, events } = runtimeHarness()
   const warmup = runtime.warmupInpaint()
@@ -1499,150 +1442,83 @@ test('repair cannot reset the runtime while editor warmup is initializing', asyn
   await runtime.repairRuntime(() => {})
 })
 
-function preprocessHarness(failure, globals = {}) {
-  const deleted = []
-  const cv = {
-    COLOR_RGBA2RGB: 'rgb',
-    COLOR_RGBA2GRAY: 'gray',
-    imread() {
-      if (failure === 'read') throw new Error('read failed')
-      return { delete: () => deleted.push('source') }
-    },
-    Mat: class {
-      rows = 2
-      cols = 2
-      constructor() {
-        if (failure === 'allocate') throw new Error('allocate failed')
-      }
-      get data() {
-        if (failure === 'copy') throw new Error('copy failed')
-        return this.bytes
-      }
-      delete() {
-        this.bytes?.fill(0)
-        deleted.push('converted')
-      }
-    },
-    cvtColor(_source, output, mode) {
-      if (failure === 'convert') throw new Error('convert failed')
-      output.bytes = new Uint8Array(
-        mode === 'rgb'
-          ? [255, 0, 128, 10, 20, 30, 40, 50, 60, 70, 80, 90]
-          : [0, 254, 255, 255]
-      )
-    },
+// Fixed pixel expectations captured from the former OpenCV preprocessing.
+const pixelFixture = new Uint8ClampedArray([
+  255, 0, 128, 255, 10, 20, 30, 255, 254, 254, 254, 255, 255, 255, 255, 255,
+])
+function preprocessHarness(failure, pixels = pixelFixture) {
+  const draws = []
+  const canvas = {
+    getContext: () =>
+      failure === 'context'
+        ? null
+        : {
+            drawImage: (...args) => {
+              if (failure === 'draw') throw new Error('draw failed')
+              draws.push(args)
+            },
+            getImageData: () => {
+              if (failure === 'read') throw new Error('read failed')
+              return { data: pixels }
+            },
+          },
   }
   return {
+    canvas,
+    draws,
     adapter: loadModule(
       'src/adapters/preprocess.ts',
-      { './opencv': cv },
-      globals
+      {},
+      {
+        document: { createElement: () => canvas },
+      }
     ),
-    deleted,
   }
 }
 
-for (const failure of [undefined, 'context', 'draw', 'read']) {
-  test(`resized mask reads canvas pixels and releases its buffer after ${failure ?? 'success'}`, () => {
-    let drawn = false
-    const canvas = {
-      getContext: () =>
-        failure === 'context'
-          ? null
-          : {
-              drawImage(_image, x, y, width, height) {
-                assert.deepEqual([x, y, width, height], [0, 0, 2, 2])
-                drawn = true
-                if (failure === 'draw') throw new Error('draw failed')
-              },
-            },
-      toDataURL() {
-        throw new Error('mask must not be encoded')
-      },
-    }
-    const { adapter } = preprocessHarness(failure, {
-      document: { createElement: () => canvas },
-    })
-    const run = () => adapter.readResizedMask({}, 2, 2)
-    if (failure) assert.throws(run, /context|draw|read/)
-    else assert.deepEqual(run(), new Uint8Array([255, 255, 0, 0]))
-    assert.equal(drawn, failure !== 'context')
+test('Canvas RGB conversion retains natural resolution, CHW order and normalization', () => {
+  const { adapter, canvas, draws } = preprocessHarness()
+  const image = { naturalWidth: 2, naturalHeight: 2, width: 20, height: 10 }
+  const expected = new Uint8Array([
+    255, 10, 254, 255, 0, 20, 254, 255, 128, 30, 254, 255,
+  ])
+  assert.deepEqual(adapter.readRGB(image), expected)
+  assert.deepEqual(
+    adapter.readRGB(image, true),
+    Float32Array.from(expected, n => n / 255)
+  )
+  assert.deepEqual(draws[0].slice(1), [0, 0, 2, 2])
+  assert.equal(canvas.width, 0)
+  assert.equal(canvas.height, 0)
+})
+
+test('Canvas masks preserve the old white threshold, near-white and transparent edges', () => {
+  const pixels = new Uint8ClampedArray([
+    0, 0, 0, 0, 255, 255, 255, 255, 254, 254, 254, 255, 255, 255, 254, 255, 254,
+    255, 255, 255, 255, 254, 255, 255, 255, 255, 255, 1, 128, 128, 128, 128,
+  ])
+  const { adapter, canvas, draws } = preprocessHarness(undefined, pixels)
+  const source = { width: 2, height: 2 }
+  assert.deepEqual(
+    adapter.readResizedMask(source, 4, 2),
+    new Uint8Array([255, 0, 255, 0, 0, 255, 0, 255])
+  )
+  assert.deepEqual(draws[0], [source, 0, 0, 4, 2])
+  assert.equal(canvas.width, 0)
+  assert.equal(canvas.height, 0)
+})
+
+for (const failure of ['context', 'draw', 'read']) {
+  test(`pixel preprocessing releases its canvas after ${failure} fails`, () => {
+    const { adapter, canvas } = preprocessHarness(failure)
+    assert.throws(
+      () => adapter.readMask({ width: 2, height: 2 }),
+      /context|draw|read/
+    )
     assert.equal(canvas.width, 0)
     assert.equal(canvas.height, 0)
   })
 }
-
-test('RGB and mask preprocessing returns independent buffers and frees matrices', () => {
-  const { adapter, deleted } = preprocessHarness()
-  const expected = new Uint8Array([
-    255, 10, 40, 70, 0, 20, 50, 80, 128, 30, 60, 90,
-  ])
-  assert.deepEqual(adapter.readRGB({}), expected)
-  assert.deepEqual(
-    adapter.readRGB({}, true),
-    Float32Array.from(expected, value => value / 255)
-  )
-  assert.deepEqual(adapter.readMask({}), new Uint8Array([255, 255, 0, 0]))
-  assert.deepEqual(deleted, [
-    'converted',
-    'source',
-    'converted',
-    'source',
-    'converted',
-    'source',
-  ])
-})
-
-for (const failure of ['read', 'allocate', 'convert', 'copy']) {
-  test(`preprocessing frees every allocated matrix after ${failure} fails`, () => {
-    for (const operation of ['readRGB', 'readMask']) {
-      const { adapter, deleted } = preprocessHarness(failure)
-      assert.throws(() => adapter[operation]({}), new RegExp(failure))
-      assert.deepEqual(
-        deleted,
-        failure === 'read'
-          ? []
-          : failure === 'allocate'
-            ? ['source']
-            : ['converted', 'source']
-      )
-    }
-  })
-}
-
-test('preprocessing matches real OpenCV channel conversion', async () => {
-  const { ensureOpenCV, default: cv } = loadModule('src/adapters/opencv.ts')
-  await ensureOpenCV()
-  const rgba = [
-    255, 0, 128, 255, 10, 20, 30, 255, 254, 254, 254, 255, 255, 255, 255, 255,
-  ]
-  const input = cv.matFromArray(2, 2, cv.CV_8UC4, rgba)
-  const gray = new cv.Mat()
-  try {
-    const adapter = loadModule('src/adapters/preprocess.ts', {
-      './opencv': {
-        imread: () => input.clone(),
-        Mat: cv.Mat,
-        cvtColor: cv.cvtColor,
-        COLOR_RGBA2RGB: cv.COLOR_RGBA2RGB,
-        COLOR_RGBA2GRAY: cv.COLOR_RGBA2GRAY,
-      },
-    })
-    assert.deepEqual(
-      adapter.readRGB({}),
-      new Uint8Array([255, 10, 254, 255, 0, 20, 254, 255, 128, 30, 254, 255])
-    )
-    cv.cvtColor(input, gray, cv.COLOR_RGBA2GRAY)
-    assert.deepEqual(
-      adapter.readMask({}),
-      Uint8Array.from(gray.data, value => (value === 255 ? 0 : 255))
-    )
-    assert.equal(input.isDeleted(), false)
-  } finally {
-    gray.delete()
-    input.delete()
-  }
-})
 
 function upscaleHarness({ runtime = {}, globals = {} } = {}) {
   class Tensor {
@@ -1654,7 +1530,7 @@ function upscaleHarness({ runtime = {}, globals = {} } = {}) {
     'src/adapters/superResolution.ts',
     {
       '../utils': loadModule('src/utils.ts'),
-      './opencv': { default: {}, ensureOpenCV: async () => {} },
+      '../imageResources': loadModule('src/imageResources.ts', {}, globals),
       './preprocess': {},
       './runtime': runtime,
       '../imageSize': loadModule('src/imageSize.ts'),
@@ -1800,7 +1676,8 @@ test('4x upscaling rejects truncated outputs even when dimensions are valid', as
 function inpaintOutputHarness(
   output,
   encodeError = false,
-  decodeError = false
+  runSession = async () => ({ result: output }),
+  runtimeOverride
 ) {
   let rendered
   const images = []
@@ -1813,7 +1690,7 @@ function inpaintOutputHarness(
     width = 20
     height = 10
     set src(value) {
-      queueMicrotask(() => (decodeError ? this.onerror?.() : this.onload?.()))
+      queueMicrotask(() => this.onload?.())
     }
   }
   const canvas = {
@@ -1823,26 +1700,25 @@ function inpaintOutputHarness(
         rendered = image
       },
     }),
-    toDataURL: () => {
+    toBlob: callback => {
       if (encodeError) throw new Error('encode failed')
-      return 'data:result'
+      callback(new Blob(['result'], { type: 'image/png' }))
     },
   }
   const adapter = loadModule(
     'src/adapters/inpainting.ts',
     {
       '../utils': loadModule('src/utils.ts'),
-      './opencv': { ensureOpenCV: async () => {} },
       './preprocess': {
         readRGB: () => new Uint8Array(6),
         readResizedMask: () => new Uint8Array(2),
       },
       './runtime': {
-        withRuntime: task => task(),
+        withRuntime: runtimeOverride?.withRuntime ?? (task => task()),
         getSession: async () => ({
           inputNames: ['rgb', 'mask'],
           outputNames: ['result'],
-          run: async () => ({ result: output }),
+          run: runSession,
         }),
       },
     },
@@ -1866,24 +1742,13 @@ function inpaintOutputHarness(
     }
   )
   return {
-    run: (mask = 'data:mask') => adapter.default(new MockImage(), mask),
+    run: (mask = {}, signal) =>
+      adapter.default(new MockImage(), mask, undefined, signal),
     images,
     rendered: () => rendered,
     canvas,
   }
 }
-
-test('mask decoding failures omit image data and clear decoder callbacks', async () => {
-  const { run, images, rendered } = inpaintOutputHarness(undefined, false, true)
-  const source = `data:image/png;base64,${'A'.repeat(1024 * 1024)}`
-  await assert.rejects(
-    run(source),
-    error => error.message === 'Unable to decode image'
-  )
-  assert.equal(rendered(), undefined)
-  assert.equal(images.at(-1).onload, null)
-  assert.equal(images.at(-1).onerror, null)
-})
 
 test('upscale file decoding failure clears callbacks and revokes its object URL', async () => {
   const images = [],
@@ -1892,6 +1757,7 @@ test('upscale file decoding failure clears callbacks and revokes its object URL'
     constructor() {
       images.push(this)
     }
+    removeAttribute() {}
     set src(_value) {
       queueMicrotask(() => this.onerror?.())
     }
@@ -1931,7 +1797,7 @@ for (const fails of [false, true]) {
       fails
     )
     if (fails) await assert.rejects(run(), /encode failed/)
-    else assert.equal(await run(), 'data:result')
+    else assert.equal(await (await run()).text(), 'result')
     assert.equal(canvas.width, 0)
     assert.equal(canvas.height, 0)
   })
@@ -1955,7 +1821,7 @@ test('inpainting converts valid planar output to RGBA without changing pixels', 
     data: new Uint8Array([1, 2, 3, 4, 5, 6]),
     dims: [1, 3, 1, 2],
   })
-  assert.equal(await run(), 'data:result')
+  assert.equal(await (await run()).text(), 'result')
   assert.deepEqual(
     rendered().data,
     new Uint8ClampedArray([1, 3, 5, 255, 2, 4, 6, 255])
@@ -2260,4 +2126,430 @@ test('import cancellation and timeout propagate into stalled local decoding', as
     if (action === 'timeout')
       assert.equal(states.at(-1).error, 'image_import_timeout')
   }
+})
+
+test('history caps steps while preserving stable IDs, undo to original and redo', () => {
+  const { historyReducer, HISTORY_MAX_STEPS } = loadModule('src/history.ts')
+  let state = { entries: [], index: -1 }
+  for (let id = 1; id <= 25; id++)
+    state = historyReducer(state, {
+      type: 'append',
+      entry: { id, bytes: 1 },
+      sizeOf: e => e.bytes,
+    })
+  assert.equal(state.entries.length, HISTORY_MAX_STEPS)
+  assert.equal(state.evicted, 5)
+  assert.deepEqual(
+    state.entries.map(e => e.id),
+    Array.from({ length: 20 }, (_, i) => i + 6)
+  )
+  for (let i = 0; i < 20; i++) state = historyReducer(state, { type: 'undo' })
+  assert.equal(state.index, -1)
+  assert.equal(historyReducer(state, { type: 'redo' }).entries[0].id, 6)
+})
+
+test('history budgets include the current result and trim branches before evicting', () => {
+  const { historyReducer, HISTORY_MAX_BYTES: limit } =
+    loadModule('src/history.ts')
+  const append = (state, id, bytes) =>
+    historyReducer(state, {
+      type: 'append',
+      entry: { id, bytes },
+      sizeOf: e => e.bytes,
+    })
+  let state = append({ entries: [], index: -1 }, 1, limit / 2)
+  state = append(state, 2, limit / 2)
+  assert.equal(state.entries.length, 2)
+  state = historyReducer(state, { type: 'select', index: 0 })
+  state = append(state, 3, limit / 2)
+  assert.deepEqual(
+    state.entries.map(e => e.id),
+    [1, 3]
+  )
+  assert.equal(state.evicted, undefined)
+  state = append(state, 4, 1)
+  assert.deepEqual(
+    state.entries.map(e => e.id),
+    [3, 4]
+  )
+  assert.equal(state.evicted, 1)
+  state = append(state, 5, limit + 1)
+  assert.deepEqual(
+    state.entries.map(e => e.id),
+    [5]
+  )
+  assert.equal(state.evicted, 3)
+  assert.equal(historyReducer(state, { type: 'undo' }).index, -1)
+})
+
+test('cancelled model download waiters detach while other callers finish and cache', async () => {
+  let deliver,
+    calls = 0
+  const { cache } = cacheHarness(() => {
+    calls++
+    return new Promise(resolve => {
+      deliver = resolve
+    })
+  })
+  const controller = new AbortController(),
+    first = [],
+    second = []
+  const abandoned = cache.downloadModel(
+    'inpaint',
+    n => first.push(n),
+    controller.signal
+  )
+  const rejected = assert.rejects(abandoned, { name: 'AbortError' })
+  const retained = cache.downloadModel('inpaint', n => second.push(n))
+  await new Promise(setImmediate)
+  controller.abort()
+  await rejected
+  const count = first.length
+  deliver(new Response(new Uint8Array([1, 2, 3])))
+  await retained
+  assert.equal(calls, 1)
+  assert.equal(first.length, count)
+  assert.equal(second.at(-1), 100)
+  assert.equal((await cache.loadModel('inpaint')).byteLength, 3)
+})
+
+test('cancelling a session waiter preserves shared initialization and removes its observer', async () => {
+  let finish,
+    creates = 0
+  const { runtime } = runtimeHarness({
+    createSession: () =>
+      ++creates === 1
+        ? new Promise(resolve => {
+            finish = resolve
+          })
+        : Promise.resolve(),
+  })
+  const controller = new AbortController(),
+    stages = []
+  const abandoned = runtime.getSession(
+    'inpaint',
+    stage => stages.push(stage),
+    controller.signal
+  )
+  const rejected = assert.rejects(abandoned, { name: 'AbortError' })
+  await new Promise(setImmediate)
+  controller.abort()
+  await rejected
+  const count = stages.length
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
+  const retained = runtime.getSession('inpaint')
+  finish()
+  await retained
+  assert.equal(stages.length, count)
+  await runtime.repairRuntime(() => {})
+})
+
+test('queued cancellation settles before active inference while keeping repair blocked', async () => {
+  const { runtime } = runtimeHarness()
+  let finish
+  const active = runtime.withRuntime(
+    () =>
+      new Promise(resolve => {
+        finish = resolve
+      })
+  )
+  const controller = new AbortController()
+  const queued = runtime.withRuntime(
+    async () => assert.fail('queued operation ran'),
+    controller.signal
+  )
+  const rejected = assert.rejects(queued, { name: 'AbortError' })
+  controller.abort()
+  await rejected
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
+  finish()
+  await active
+  await runtime.withRuntime(async () => 'next')
+  await runtime.repairRuntime(() => {})
+})
+
+for (const cancelAt of ['before', 'status', 'inference', 'between']) {
+  test(`upscale cancellation at ${cancelAt} omits remaining tiles and final output`, async () => {
+    const controller = new AbortController()
+    const { adapter, Tensor } = upscaleHarness()
+    let runs = 0
+    const progress = []
+    if (cancelAt === 'before') controller.abort()
+    const operation = adapter.tileProc(
+      new Tensor('float32', new Float32Array(53 * 3), [1, 3, 1, 53]),
+      {
+        inputNames: ['rgb'],
+        outputNames: ['result'],
+        run: async () => {
+          runs++
+          if (cancelAt === 'inference') controller.abort()
+          return {
+            result: new Tensor(
+              'float32',
+              new Float32Array(256 * 256 * 3),
+              [1, 3, 256, 256]
+            ),
+          }
+        },
+      },
+      n => {
+        progress.push(n)
+        if (cancelAt === 'between') controller.abort()
+      },
+      () => {
+        if (cancelAt === 'status') controller.abort()
+      },
+      controller.signal
+    )
+    await assert.rejects(operation, { name: 'AbortError' })
+    assert.equal(runs, ['before', 'status'].includes(cancelAt) ? 0 : 1)
+    assert.deepEqual(progress, cancelAt === 'between' ? [50] : [])
+  })
+}
+
+test('inpaint cancellation waits for active inference, keeps the lock and omits encoding', async () => {
+  const { runtime } = runtimeHarness()
+  const controller = new AbortController()
+  let finish, entered
+  const started = new Promise(resolve => {
+    entered = resolve
+  })
+  const { run, rendered } = inpaintOutputHarness(
+    undefined,
+    false,
+    () => {
+      entered()
+      return new Promise(resolve => {
+        finish = resolve
+      })
+    },
+    runtime
+  )
+  let settled = false
+  const task = run({}, controller.signal).finally(() => {
+    settled = true
+  })
+  const rejected = assert.rejects(task, { name: 'AbortError' })
+  await started
+  controller.abort()
+  await new Promise(setImmediate)
+  assert.equal(settled, false)
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
+  finish({})
+  await rejected
+  assert.equal(rendered(), undefined)
+  await runtime.repairRuntime(() => {})
+})
+
+function resourceHarness({
+  decodePending = false,
+  encodePending = false,
+  encodeNull = false,
+  encodeThrows = false,
+  contextError = false,
+  globals = {},
+} = {}) {
+  const images = [],
+    canvases = [],
+    urls = new Set(),
+    revoked = [],
+    encoders = []
+  class MockImage {
+    naturalWidth = 640
+    naturalHeight = 480
+    constructor() {
+      images.push(this)
+    }
+    set src(value) {
+      this.source = value
+      if (!decodePending) queueMicrotask(() => this.onload?.())
+    }
+    removeAttribute() {
+      this.source = undefined
+    }
+  }
+  let id = 0
+  const resources = loadModule(
+    'src/imageResources.ts',
+    {},
+    {
+      Image: MockImage,
+      HTMLImageElement: MockImage,
+      URL: {
+        createObjectURL: () => {
+          const url = `blob:${++id}`
+          urls.add(url)
+          return url
+        },
+        revokeObjectURL: url => {
+          assert.ok(urls.delete(url), `URL released once: ${url}`)
+          revoked.push(url)
+        },
+      },
+      document: {
+        createElement: () => {
+          const canvas = {
+            getContext: () =>
+              contextError ? null : { drawImage() {}, putImageData() {} },
+            toBlob: callback => {
+              if (encodeThrows) throw new Error('encode failure')
+              const finish = () =>
+                callback(
+                  encodeNull ? null : new Blob(['png'], { type: 'image/png' })
+                )
+              if (encodePending) encoders.push(finish)
+              else queueMicrotask(finish)
+            },
+          }
+          canvases.push(canvas)
+          return canvas
+        },
+      },
+      ...globals,
+    }
+  )
+  return { resources, images, canvases, urls, revoked, encoders }
+}
+
+test('history entries own separate PNG thumbnails, estimate pixels, and release both URLs', async () => {
+  const { resources, images, canvases, urls } = resourceHarness()
+  const blob = new Blob(['full-image'])
+  const entry = await resources.createHistoryEntry(
+    blob,
+    7,
+    new AbortController().signal
+  )
+  assert.equal(entry.id, 7)
+  assert.equal(entry.bytes, blob.size + 3 + 4 * (640 * 480 + 224 * 168))
+  assert.equal(urls.size, 2)
+  assert.notEqual(entry.url, entry.thumbnail)
+  assert.equal(canvases[0].width, 0)
+  assert.equal(canvases[0].height, 0)
+  resources.releaseEntry(entry)
+  assert.equal(urls.size, 0)
+  assert.equal(images[0].source, undefined)
+})
+
+for (const phase of ['decode', 'encode', 'null', 'throw', 'context']) {
+  test(`history creation cleans resources after ${phase} cancellation or failure`, async () => {
+    const h = resourceHarness({
+      decodePending: phase === 'decode',
+      encodePending: phase === 'encode',
+      encodeNull: phase === 'null',
+      encodeThrows: phase === 'throw',
+      contextError: phase === 'context',
+    })
+    const controller = new AbortController()
+    const task = h.resources.createHistoryEntry(
+      new Blob(['png']),
+      1,
+      controller.signal
+    )
+    const rejected = assert.rejects(task)
+    if (phase === 'decode' || phase === 'encode') {
+      await new Promise(setImmediate)
+      controller.abort()
+    }
+    await rejected
+    for (const finish of h.encoders) finish()
+    await new Promise(setImmediate)
+    assert.equal(h.urls.size, 0)
+    assert.equal(h.images[0].source, undefined)
+    assert.ok(
+      h.canvases.every(canvas => canvas.width === 0 && canvas.height === 0)
+    )
+  })
+}
+
+test('encoding timeout releases the canvas and ignores late results', async () => {
+  const timers = new Map()
+  let id = 0
+  const h = resourceHarness({
+    encodePending: true,
+    globals: {
+      setTimeout: callback => {
+        timers.set(++id, callback)
+        return id
+      },
+      clearTimeout: id => timers.delete(id),
+    },
+  })
+  const task = h.resources.imageDataToBlob({ width: 2, height: 2 })
+  const rejected = assert.rejects(task, /encoding timed out/)
+  timers.values().next().value()
+  await rejected
+  h.encoders[0]()
+  assert.equal(timers.size, 0)
+  assert.equal(h.canvases[0].width, 0)
+  assert.equal(h.canvases[0].height, 0)
+})
+
+test('a cancelled encoder completion cannot return a late image result', async () => {
+  const controller = new AbortController()
+  const canvas = {
+    getContext: () => ({ putImageData() {} }),
+    toBlob: callback => {
+      callback(new Blob(['late']))
+      controller.abort()
+    },
+  }
+  const resources = loadModule(
+    'src/imageResources.ts',
+    {},
+    { document: { createElement: () => canvas } }
+  )
+  await assert.rejects(
+    resources.imageDataToBlob({ width: 2, height: 2 }, controller.signal),
+    { name: 'AbortError' }
+  )
+  assert.equal(canvas.width, 0)
+  assert.equal(canvas.height, 0)
+})
+
+test('cancelling owned file decoding releases the URL and never enters preprocessing', async () => {
+  const h = resourceHarness({ decodePending: true })
+  const controller = new AbortController()
+  const task = h.resources.withImage(
+    new File(['png'], 'source.png'),
+    controller.signal,
+    async () => assert.fail('cancelled image used')
+  )
+  const rejected = assert.rejects(task, { name: 'AbortError' })
+  controller.abort()
+  await rejected
+  assert.equal(h.urls.size, 0)
+  assert.equal(h.images[0].source, undefined)
+  assert.equal(h.images[0].onload, null)
+  assert.equal(h.images[0].onerror, null)
+})
+
+test('borrowed decoded images are reused and remain owned by the caller', async () => {
+  const h = resourceHarness()
+  const entry = await h.resources.createHistoryEntry(
+    new Blob(['png']),
+    1,
+    new AbortController().signal
+  )
+  const controller = new AbortController()
+  await assert.rejects(
+    h.resources.withImage(entry.image, controller.signal, async image => {
+      assert.equal(image, entry.image)
+      controller.abort()
+      controller.signal.throwIfAborted()
+    }),
+    { name: 'AbortError' }
+  )
+  assert.equal(h.urls.size, 2)
+  assert.equal(h.images.length, 1)
+  assert.equal(entry.image.source, entry.url)
+  h.resources.releaseEntry(entry)
 })
