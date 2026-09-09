@@ -2,8 +2,7 @@
 /* eslint-disable no-plusplus */
 import cv, { type Mat } from 'opencv-ts'
 import type { InferenceSession, Tensor } from 'onnxruntime-web'
-import { type Capabilities, getCapabilities } from './util'
-import { ensureModel } from './cache'
+import { getSession, withRuntime } from './runtime'
 
 function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -191,22 +190,7 @@ function processImage(
     }
   })
 }
-function configEnv(capabilities: Capabilities) {
-  ort.env.wasm.wasmPaths =
-    'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/'
-  if (capabilities.webgpu) {
-    ort.env.wasm.numThreads = 1
-  } else {
-    if (capabilities.threads) {
-      ort.env.wasm.numThreads = navigator.hardwareConcurrency ?? 4
-    }
-    if (capabilities.simd) {
-      ort.env.wasm.simd = true
-    }
-    ort.env.wasm.proxy = true
-  }
-  console.log('env', ort.env.wasm)
-}
+
 function imageDataToDataURL(imageData: ImageData) {
   // 创建 canvas
   const canvas = document.createElement('canvas')
@@ -223,8 +207,7 @@ function imageDataToDataURL(imageData: ImageData) {
   // 导出为数据 URL
   return canvas.toDataURL()
 }
-let model: InferenceSession | null = null
-export default async function superResolution(
+async function superResolution(
   imageFile: File | HTMLImageElement,
   callback: (progress: number) => void
 ) {
@@ -240,16 +223,7 @@ export default async function superResolution(
   }
 
   console.time('sessionCreate')
-  let session = model
-  if (!session) {
-    const capabilities = await getCapabilities()
-    configEnv(capabilities)
-    const modelBuffer = await ensureModel('superResolution')
-    session = await ort.InferenceSession.create(modelBuffer, {
-      executionProviders: [capabilities.webgpu ? 'webgpu' : 'wasm'],
-    })
-    model = session
-  }
+  const session = await getSession('superResolution')
   console.timeEnd('sessionCreate')
 
   const imageTersorData = await processImage(img)
@@ -267,4 +241,8 @@ export default async function superResolution(
   console.timeEnd('postProcess')
 
   return url
+}
+
+export default function run(...args: Parameters<typeof superResolution>) {
+  return withRuntime(() => superResolution(...args))
 }

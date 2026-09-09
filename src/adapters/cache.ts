@@ -60,6 +60,12 @@ export async function modelExists(modelType: modelType) {
   return model instanceof ArrayBuffer && model.byteLength > 0
 }
 
+export async function removeCachedModel(modelType: modelType) {
+  // Let an earlier preload finish before removing its result.
+  await pendingDownloads.get(modelType)?.promise.catch(() => {})
+  await localforage.removeItem(getModel(modelType).name)
+}
+
 export async function ensureModel(modelType: modelType) {
   const cached = await loadModel(modelType)
   if (cached) return cached

@@ -2,7 +2,7 @@ export async function checkWebgpu() {
   if (!navigator.gpu) {
     return false
   }
-  const adapter = await navigator.gpu.requestAdapter()
+  const adapter = await navigator.gpu.requestAdapter().catch(() => null)
   if (!adapter) {
     return false
   }
@@ -46,11 +46,13 @@ export interface Capabilities {
   threads: boolean
 }
 
-export const getCapabilities = async (): Promise<Capabilities> => {
+export const getCapabilities = async (
+  skipWebgpu = false
+): Promise<Capabilities> => {
   return {
-    webgpu: await checkWebgpu(),
+    webgpu: !skipWebgpu && (await checkWebgpu()),
     wasm: wasm(),
-    simd: await simd(),
+    simd: wasm() && (await simd()),
     threads: await threads(),
   }
 }
@@ -70,18 +72,51 @@ export const getTagSrc = async () => {
   return `${prefix}ort.min.js`
 }
 
-export const loadingOnnxruntime = async () => {
-  const script = document.createElement('script')
-  script.src = await getTagSrc()
-  script.crossOrigin = 'anonymous'
+export let runtimeBase = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${version}/dist/`
+let runtimeLoading: Promise<void> | undefined
 
+async function loadScript(src: string) {
+  const script = document.createElement('script')
+  script.src = src
+  script.crossOrigin = 'anonymous'
   await new Promise<void>((resolve, reject) => {
-    script.addEventListener('load', () => resolve(), { once: true })
-    script.addEventListener(
-      'error',
-      () => reject(new Error(`Failed to load ONNX Runtime from ${script.src}`)),
-      { once: true }
-    )
+    const fail = () => {
+      clearTimeout(timeout)
+      script.remove()
+      reject(new Error(`Failed to load ONNX Runtime from ${src}`))
+    }
+    const timeout = setTimeout(fail, 30_000)
+    script.onload = () => {
+      clearTimeout(timeout)
+      if (typeof ort === 'undefined') fail()
+      else resolve()
+    }
+    script.onerror = fail
     document.head.appendChild(script)
   })
+}
+
+export const loadingOnnxruntime = (
+  compatible = false,
+  reset = false
+): Promise<void> => {
+  if (runtimeLoading) return runtimeLoading
+  if (reset) {
+    // A failed WASM backend retains its initialization error inside ORT.
+    // Load a fresh runtime only after the caller has released all sessions.
+    delete (window as unknown as { ort?: unknown }).ort
+  }
+  if (typeof ort !== 'undefined') return Promise.resolve()
+  runtimeLoading = (async () => {
+    const src = compatible ? `${runtimeBase}ort.wasm.min.js` : await getTagSrc()
+    try {
+      await loadScript(src)
+    } catch {
+      runtimeBase = `https://unpkg.com/onnxruntime-web@${version}/dist/`
+      await loadScript(`${runtimeBase}${src.split('/').pop()}`)
+    }
+  })().finally(() => {
+    runtimeLoading = undefined
+  })
+  return runtimeLoading
 }

@@ -2,6 +2,7 @@ import ReactDOM from 'react-dom'
 import './index.css'
 import App from './App'
 import { loadingOnnxruntime } from './adapters/util'
+import RepairRuntime from './components/RepairRuntime'
 
 const root = document.getElementById('root')
 
@@ -28,6 +29,11 @@ void bootstrap().catch(error => {
         >
           {isChinese ? '重试' : 'Retry'}
         </button>
+        <RepairRuntime
+          onRepaired={() => {
+            ReactDOM.render(<App />, root)
+          }}
+        />
       </div>
     </main>,
     root

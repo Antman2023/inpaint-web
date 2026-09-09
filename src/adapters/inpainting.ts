@@ -1,9 +1,8 @@
 /* eslint-disable camelcase */
 /* eslint-disable no-plusplus */
 import cv, { type Mat } from 'opencv-ts'
-import type { InferenceSession, Tensor } from 'onnxruntime-web'
-import { ensureModel } from './cache'
-import { type Capabilities, getCapabilities } from './util'
+import type { Tensor } from 'onnxruntime-web'
+import { getSession, withRuntime } from './runtime'
 // ort.env.debug = true
 // ort.env.logLevel = 'verbose'
 // ort.env.webgpu.profilingMode = 'default'
@@ -159,22 +158,6 @@ function imageDataToDataURL(imageData: ImageData) {
   return canvas.toDataURL()
 }
 
-function configEnv(capabilities: Capabilities) {
-  ort.env.wasm.wasmPaths =
-    'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/'
-  if (capabilities.webgpu) {
-    ort.env.wasm.numThreads = 1
-  } else {
-    if (capabilities.threads) {
-      ort.env.wasm.numThreads = navigator.hardwareConcurrency ?? 4
-    }
-    if (capabilities.simd) {
-      ort.env.wasm.simd = true
-    }
-    ort.env.wasm.proxy = true
-  }
-  console.log('env', ort.env.wasm)
-}
 const resizeMark = (
   image: HTMLImageElement,
   width: number,
@@ -204,30 +187,20 @@ const resizeMark = (
     resizedImage.src = resizedImageUrl
   })
 }
-let model: InferenceSession | null = null
 export type InpaintStage =
   | 'processing_model'
   | 'processing_prepare'
   | 'processing_inference'
   | 'processing_output'
 
-export default async function inpaint(
+async function inpaint(
   imageFile: File | HTMLImageElement,
   maskBase64: string,
   onStage?: (stage: InpaintStage) => void
 ) {
   onStage?.('processing_model')
   console.time('sessionCreate')
-  let session = model
-  if (!session) {
-    const capabilities = await getCapabilities()
-    configEnv(capabilities)
-    const modelBuffer = await ensureModel('inpaint')
-    session = await ort.InferenceSession.create(modelBuffer, {
-      executionProviders: [capabilities.webgpu ? 'webgpu' : 'wasm'],
-    })
-    model = session
-  }
+  const session = await getSession('inpaint')
   console.timeEnd('sessionCreate')
   console.time('preProcess')
   onStage?.('processing_prepare')
@@ -293,4 +266,8 @@ export default async function inpaint(
   console.timeEnd('postProcess')
 
   return result
+}
+
+export default function run(...args: Parameters<typeof inpaint>) {
+  return withRuntime(() => inpaint(...args))
 }

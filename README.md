@@ -51,6 +51,14 @@ Demo link: https://inpaint.itsong.com
 
 `npm run start`
 
+## 网页运行环境修复
+
+点击右上角“关于 / 反馈”中的“一键修复运行环境”。模型下载失败或运行组件加载失败时，错误页面也提供此入口。
+
+修复会重新下载图片修复模型及已使用的超分辨率模型，释放旧推理会话，并初始化单线程 WebAssembly 兼容模式。当前图片和编辑历史会保留，无需刷新页面；图片正在处理时需等待处理结束。兼容模式在本次页面会话内生效，速度可能低于 GPU 模式。
+
+修复需要联网。若模型下载、浏览器存储或 WebAssembly 不可用，页面会显示失败原因并允许重试；网页无法替你修改浏览器设置或安装显卡驱动。
+
 ## Contributors
 
 <a href="https://github.com/Antman2023/inpaint-web/graphs/contributors">

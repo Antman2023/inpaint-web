@@ -15,6 +15,7 @@ import Progress from './components/Progress'
 import { downloadModel } from './adapters/cache'
 import { type LanguageTag, languageTag, message, setLanguageTag } from './i18n'
 import { useTheme } from './theme'
+import RepairRuntime from './components/RepairRuntime'
 
 const EXAMPLE_IMAGES = ['bag', 'dog', 'car', 'bird', 'jacket', 'shoe', 'paris']
 const Editor = lazy(() => import('./Editor'))
@@ -231,6 +232,7 @@ function App() {
                 GitHub
               </a>
             </p>
+            <RepairRuntime />
           </div>
         </Modal>
       )}
@@ -262,6 +264,9 @@ function App() {
             <Button primary onClick={preloadInpaintModel}>
               {stateLanguageTag === 'zh' ? '重试' : 'Retry'}
             </Button>
+            <RepairRuntime
+              onRepaired={() => setModelDownloadError(undefined)}
+            />
           </div>
         </Modal>
       )}

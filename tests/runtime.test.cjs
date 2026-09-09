@@ -187,3 +187,151 @@ for (const error of ['decodeError', 'contextError', 'encodeError']) {
     assert.equal(revoked(), 1)
   })
 }
+
+function runtimeHarness({ cachedUpscale = false, failDownload = false } = {}) {
+  const events = []
+  let fail = failDownload
+  const runtime = loadModule(
+    'src/adapters/runtime.ts',
+    {
+      './cache': {
+        modelExists: async () => cachedUpscale,
+        ensureModel: async type => type,
+        removeCachedModel: async type => events.push(['remove', type]),
+        downloadModel: async (type, progress) => {
+          events.push(['download', type])
+          if (fail) throw new Error('offline')
+          progress(100)
+        },
+      },
+      './util': {
+        wasm: () => true,
+        getCapabilities: async () => ({ webgpu: true, simd: true }),
+        loadingOnnxruntime: async () => {},
+        runtimeBase: 'https://runtime.test/',
+      },
+    },
+    {
+      ort: {
+        env: { wasm: {} },
+        InferenceSession: {
+          create: async (type, options) => {
+            events.push(['create', type, options.executionProviders[0]])
+            return { release: async () => events.push(['release', type]) }
+          },
+        },
+      },
+    }
+  )
+  return {
+    runtime,
+    events,
+    recover: () => {
+      fail = false
+    },
+  }
+}
+
+test('repair releases sessions, replaces cached models and initializes WASM', async () => {
+  const { runtime, events } = runtimeHarness({ cachedUpscale: true })
+  await runtime.getSession('inpaint')
+  const progress = []
+  await runtime.repairRuntime(p => progress.push(p))
+  assert.deepEqual(events, [
+    ['create', 'inpaint', 'webgpu'],
+    ['release', 'inpaint'],
+    ['remove', 'inpaint'],
+    ['download', 'inpaint'],
+    ['create', 'inpaint', 'wasm'],
+    ['remove', 'superResolution'],
+    ['download', 'superResolution'],
+    ['create', 'superResolution', 'wasm'],
+  ])
+  assert.equal(progress.at(-1), 100)
+  await runtime.getSession('inpaint')
+  assert.equal(events.length, 8)
+})
+
+test('repair refuses active inference without touching caches or sessions', async () => {
+  const { runtime, events } = runtimeHarness()
+  let finish
+  const processing = runtime.withRuntime(
+    () =>
+      new Promise(resolve => {
+        finish = resolve
+      })
+  )
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
+  assert.deepEqual(events, [])
+  finish()
+  await processing
+  await runtime.repairRuntime(() => {})
+})
+
+test('concurrent repairs share work, block inference, and failures allow retry', async () => {
+  const { runtime, events, recover } = runtimeHarness({ failDownload: true })
+  const first = runtime.repairRuntime(() => {})
+  assert.equal(
+    runtime.repairRuntime(() => {}),
+    first
+  )
+  await assert.rejects(
+    runtime.withRuntime(async () => {}),
+    /repair in progress/
+  )
+  await assert.rejects(first, /offline/)
+  recover()
+  await runtime.repairRuntime(() => {})
+  assert.equal(events.filter(event => event[0] === 'download').length, 2)
+  await runtime.withRuntime(async () => {})
+})
+
+test('runtime loader falls back to another CDN and repair replaces the failed runtime', async () => {
+  const { runInNewContext } = require('node:vm')
+  const urls = []
+  let removed = 0
+  const context = {
+    exports: {},
+    setTimeout,
+    clearTimeout,
+    document: {
+      createElement: () => ({ remove: () => removed++ }),
+      head: {
+        appendChild: script => {
+          urls.push(script.src)
+          queueMicrotask(() => {
+            if (urls.length === 1) script.onerror()
+            else {
+              context.ort = { generation: urls.length }
+              script.onload()
+            }
+          })
+        },
+      },
+    },
+  }
+  context.window = context
+  const source = readFileSync(
+    resolve(__dirname, '../src/adapters/util.ts'),
+    'utf8'
+  )
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+    },
+  })
+  runInNewContext(outputText, context)
+  await context.exports.loadingOnnxruntime(true)
+  assert.match(urls[0], /cdn.jsdelivr.net/)
+  assert.match(urls[1], /unpkg.com/)
+  assert.equal(removed, 1)
+  const oldRuntime = context.ort
+  await context.exports.loadingOnnxruntime(true, true)
+  assert.notEqual(context.ort, oldRuntime)
+  assert.equal(context.ort.generation, 3)
+  assert.match(urls[2], /ort.wasm.min.js$/)
+})

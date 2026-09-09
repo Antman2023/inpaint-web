@@ -26,5 +26,11 @@
   "processing_inference": "正在修复图片，大图可能需要较长时间…",
   "processing_output": "正在生成结果图片…",
   "inpaint_model_download_message": "注意需要连接国际互联网，需要下载一次30MB大小模型文件,耐心等待。。。",
-  "upscaleing_model_download_message": "注意需要连接国际互联网，需要下载一次70MB大小模型文件,耐心等待。。。"
+  "upscaleing_model_download_message": "注意需要连接国际互联网，需要下载一次70MB大小模型文件,耐心等待。。。",
+  "repair_runtime": "一键修复运行环境",
+  "repair_working": "正在重新下载模型并初始化兼容模式，请保持页面打开…",
+  "repair_done": "修复完成，已启用兼容模式，可以继续处理图片。",
+  "repair_failed": "修复未完成，请检查网络连接后重试。若仍失败，请更新浏览器或尝试其他浏览器。",
+  "repair_retry": "重试",
+  "repair_close": "关闭"
 }
