@@ -1,4 +1,8 @@
-@import 'tailwindcss';
+@import 'tailwindcss' source(none);
+
+/* Only rendered application sources should contribute utility classes. */
+@source './';
+@source '../index.html';
 
 @theme inline {
   --color-canvas: var(--canvas);
@@ -168,4 +172,29 @@ input {
   .sample-button {
     transition: none;
   }
+
+  .sample-button:hover {
+    transform: none;
+  }
+}
+
+/* A full-width transparent native slider supplies touch and keyboard behavior. */
+.comparison-range {
+  appearance: none;
+}
+.comparison-range::-webkit-slider-runnable-track {
+  height: 100%;
+}
+.comparison-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 1px;
+  height: 100%;
+}
+.comparison-range::-moz-range-track {
+  height: 100%;
+}
+.comparison-range::-moz-range-thumb {
+  width: 1px;
+  height: 100%;
+  border: 0;
 }

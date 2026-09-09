@@ -1,10 +1,18 @@
 /* eslint-disable jsx-a11y/click-events-have-key-events */
 /* eslint-disable jsx-a11y/no-static-element-interactions */
-import { DownloadIcon, EyeIcon, ViewBoardsIcon } from '@heroicons/react/outline'
-import { useCallback, useEffect, useState, useRef, useMemo } from 'react'
+import { DownloadIcon, EyeIcon, ReplyIcon } from '@heroicons/react/outline'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useState,
+  useRef,
+  useMemo,
+  useReducer,
+} from 'react'
 import Button from './components/Button'
 import Slider from './components/Slider'
-import { downloadImage, loadImage, useImage, useWindowSize } from './utils'
+import { downloadImage, imageFileName, loadImage, useImage } from './utils'
 import Progress from './components/Progress'
 import { modelExists, downloadModel } from './adapters/cache'
 import Modal from './components/Modal'
@@ -12,95 +20,82 @@ import { message } from './i18n'
 import type { InpaintStage } from './adapters/inpainting'
 import { warmupInpaint } from './adapters/runtime'
 import type { UpscaleStatus } from './adapters/superResolution'
+import { historyReducer } from './history'
+import { getUpscalePlan } from './imageSize'
+import RepairRuntime from './components/RepairRuntime'
+import ImageComparison from './components/ImageComparison'
+import { type BrushStroke, drawStroke } from './brush'
 
 interface EditorProps {
   file: File
 }
 
-interface Line {
-  size?: number
-  pts: { x: number; y: number }[]
-  src: string
-}
-
-function createEmptyLine(): Line {
-  return { pts: [], src: '' }
-}
-
-function drawLines(
-  ctx: CanvasRenderingContext2D,
-  lines: Line[],
-  color = 'rgba(255, 0, 0, 0.5)'
-) {
-  ctx.strokeStyle = color
-  ctx.fillStyle = color
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
-
-  lines.forEach(line => {
-    if (!line?.pts.length || !line.size) {
-      return
-    }
-    ctx.lineWidth = line.size
-    if (line.pts.length === 1) {
-      ctx.beginPath()
-      ctx.arc(line.pts[0].x, line.pts[0].y, line.size / 2, 0, Math.PI * 2)
-      ctx.fill()
-      return
-    }
-    ctx.beginPath()
-    ctx.moveTo(line.pts[0].x, line.pts[0].y)
-    line.pts.forEach(pt => {
-      ctx.lineTo(pt.x, pt.y)
-    })
-    ctx.stroke()
-  })
+function createEmptyLine(): BrushStroke {
+  return { pts: [] }
 }
 
 const BRUSH_HIDE_ON_SLIDER_CHANGE_TIMEOUT = 2000
 export default function Editor(props: EditorProps) {
   const { file } = props
+  const [lifetime] = useState(() => new AbortController())
   useEffect(() => {
     // Prepare while the user positions the image and paints the mask.
-    void warmupInpaint().catch(error =>
-      console.warn('Model warmup failed', error)
-    )
-  }, [])
+    void warmupInpaint(lifetime.signal).catch(error => {
+      if (!lifetime.signal.aborted) console.warn('Model warmup failed', error)
+    })
+  }, [lifetime])
   const [brushSize, setBrushSize] = useState(40)
-  const [original, isOriginalLoaded] = useImage(file)
-  const [renders, setRenders] = useState<HTMLImageElement[]>([])
+  const [original, isOriginalLoaded, imageError, retryImage] = useImage(file)
+  const [history, dispatchHistory] = useReducer(
+    historyReducer<HTMLImageElement>,
+    {
+      entries: [],
+      index: -1,
+    }
+  )
+  const currentRender = history.entries[history.index]
+  const sourceImage = currentRender ?? original
+  const upscalePlan = getUpscalePlan(
+    sourceImage.naturalWidth,
+    sourceImage.naturalHeight
+  )
+  const canUndo = history.index >= 0
+  const canRedo = history.index < history.entries.length - 1
   const [context, setContext] = useState<CanvasRenderingContext2D>()
   const [maskCanvas] = useState<HTMLCanvasElement>(() => {
     return document.createElement('canvas')
   })
-  const currentLineRef = useRef<Line>(createEmptyLine())
+  const currentLineRef = useRef<BrushStroke>(createEmptyLine())
   const brushRef = useRef<HTMLDivElement>(null)
   const [showBrush, setShowBrush] = useState(false)
   const hideBrushTimeoutRef = useRef<number>()
   const [showOriginal, setShowOriginal] = useState(false)
   const [isInpaintingLoading, setIsProcessingLoading] = useState(false)
+  const [processingError, setProcessingError] = useState<{
+    operation: 'inpaint' | 'upscale'
+    details: string
+    retry?: () => void
+  }>()
   const [generateProgress, setGenerateProgress] = useState(0)
   const [upscaleStatus, setUpscaleStatus] = useState<UpscaleStatus>()
-  const upscaleBusy = useRef(false)
+  const processingBusy = useRef(false)
   const modalRef = useRef(null)
-  const separatorRef = useRef<HTMLDivElement>(null)
-  const [useSeparator, setUseSeparator] = useState(false)
-  const [separatorLeft, setSeparatorLeft] = useState(0)
-  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 })
   const historyListRef = useRef<HTMLDivElement>(null)
   const scaledBrushSize = brushSize
   const canvasDiv = useRef<HTMLDivElement>(null)
   const [downloaded, setDownloaded] = useState(true)
-  const [downloadProgress, setDownloadProgress] = useState(0)
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(0)
   const [inpaintStage, setInpaintStage] = useState<InpaintStage | null>(null)
   const mountedRef = useRef(true)
-  const windowSize = useWindowSize()
 
   const onloading = useCallback(() => {
+    setProcessingError(undefined)
+    processingBusy.current = true
     setIsProcessingLoading(true)
     setInpaintStage('processing_model')
     return {
       close: () => {
+        processingBusy.current = false
         if (mountedRef.current) {
           setInpaintStage(null)
           setIsProcessingLoading(false)
@@ -109,22 +104,22 @@ export default function Editor(props: EditorProps) {
     }
   }, [])
 
-  useEffect(
+  useLayoutEffect(
     () => () => {
       mountedRef.current = false
+      lifetime.abort()
       window.clearTimeout(hideBrushTimeoutRef.current)
     },
-    []
+    [lifetime]
   )
 
   const draw = useCallback(
-    (index = -1) => {
+    (index = history.index) => {
       if (!context) {
         return
       }
       context.clearRect(0, 0, context.canvas.width, context.canvas.height)
-      const currRender =
-        renders[index === -1 ? renders.length - 1 : index] ?? original
+      const currRender = history.entries[index] ?? original
       const { canvas } = context
 
       const canvasContainer = canvasDiv.current
@@ -157,22 +152,17 @@ export default function Editor(props: EditorProps) {
 
       const width = Math.max(1, Math.round(canvasWidth))
       const height = Math.max(1, Math.round(canvasHeight))
-      canvas.width = width
-      canvas.height = height
-      setCanvasSize(current =>
-        current.width === width && current.height === height
-          ? current
-          : { width, height }
-      )
-
+      // Resizing clears the drawing state and reallocates the backing buffer.
+      if (canvas.width !== width) canvas.width = width
+      if (canvas.height !== height) canvas.height = height
       if (currRender?.src) {
         context.drawImage(currRender, 0, 0, canvas.width, canvas.height)
       } else {
         context.drawImage(original, 0, 0, canvas.width, canvas.height)
       }
-      drawLines(context, [currentLineRef.current])
+      drawStroke(context, currentLineRef.current)
     },
-    [context, original, renders]
+    [context, original, history]
   )
 
   const refreshCanvasMask = useCallback(() => {
@@ -185,18 +175,29 @@ export default function Editor(props: EditorProps) {
     if (!ctx) {
       throw new Error('could not retrieve mask canvas')
     }
-    drawLines(ctx, [currentLineRef.current], 'white')
-  }, [context?.canvas.height, context?.canvas.width, maskCanvas])
+    drawStroke(ctx, currentLineRef.current, 'white')
+  }, [context, maskCanvas])
 
-  // Draw once the original image is loaded
+  // Toolbars and translated labels can resize the workspace without a window
+  // resize. Observe the actual container and batch redraws into one frame.
   useEffect(() => {
-    if (!context?.canvas) {
-      return
+    const container = canvasDiv.current
+    if (!container || !context || !isOriginalLoaded) return
+    draw()
+    let frame: number | undefined
+    const observer = new ResizeObserver(() => {
+      if (frame !== undefined) return
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined
+        draw()
+      })
+    })
+    observer.observe(container)
+    return () => {
+      observer.disconnect()
+      if (frame !== undefined) window.cancelAnimationFrame(frame)
     }
-    if (isOriginalLoaded && windowSize.width > 0 && windowSize.height > 0) {
-      draw()
-    }
-  }, [context?.canvas, draw, isOriginalLoaded, windowSize])
+  }, [context, draw, isOriginalLoaded])
 
   // Handle mouse interactions
   useEffect(() => {
@@ -205,6 +206,11 @@ export default function Editor(props: EditorProps) {
       return
     }
     let activePointerId: number | null = null
+    let paintFrame: number | undefined
+    const cancelPaintFrame = () => {
+      if (paintFrame !== undefined) window.cancelAnimationFrame(paintFrame)
+      paintFrame = undefined
+    }
 
     const updateBrushPosition = (ev: PointerEvent) => {
       if (brushRef.current) {
@@ -217,13 +223,18 @@ export default function Editor(props: EditorProps) {
     const getCanvasPoint = (ev: PointerEvent) => {
       const rect = canvas.getBoundingClientRect()
       return {
-        x: (ev.clientX - rect.left) * (canvas.width / rect.width),
-        y: (ev.clientY - rect.top) * (canvas.height / rect.height),
+        x: (ev.clientX - rect.left) / rect.width,
+        y: (ev.clientY - rect.top) / rect.height,
       }
     }
     const onPaint = (px: number, py: number) => {
       currentLineRef.current.pts.push({ x: px, y: py })
-      draw()
+      if (paintFrame === undefined) {
+        paintFrame = window.requestAnimationFrame(() => {
+          paintFrame = undefined
+          draw()
+        })
+      }
     }
     const onPointerMove = (ev: PointerEvent) => {
       updateBrushPosition(ev)
@@ -236,33 +247,38 @@ export default function Editor(props: EditorProps) {
     }
 
     const processStroke = async () => {
-      if (!original.src || showOriginal) {
+      if (!isOriginalLoaded || showOriginal || processingBusy.current) {
         return
       }
       if (!currentLineRef.current.pts.length) {
         return
       }
+      const stroke = currentLineRef.current
       const loading = onloading()
       try {
         refreshCanvasMask()
         const start = Date.now()
         console.log('inpaint_start')
         // each time based on the last result, the first is the original
-        const newFile = renders.slice(-1)[0] ?? file
+        const newFile = currentRender ?? file
         const { default: inpaint } = await import('./adapters/inpainting')
-        const res = await inpaint(newFile, maskCanvas.toDataURL(), stage => {
-          if (mountedRef.current) setInpaintStage(stage)
-        })
+        const res = await inpaint(
+          newFile,
+          maskCanvas.toDataURL(),
+          stage => {
+            if (mountedRef.current) setInpaintStage(stage)
+          },
+          lifetime.signal
+        )
         if (!res) {
           throw new Error('empty response')
         }
-        // TODO: fix the render if it failed loading
         const newRender = new Image()
         newRender.dataset.id = Date.now().toString()
-        await loadImage(newRender, res)
+        await loadImage(newRender, res, lifetime.signal)
         if (!mountedRef.current) return
         currentLineRef.current = createEmptyLine()
-        setRenders(current => [...current, newRender])
+        dispatchHistory({ type: 'append', entry: newRender })
         console.log('inpaint_processed', {
           duration: Date.now() - start,
         })
@@ -273,7 +289,14 @@ export default function Editor(props: EditorProps) {
         if (mountedRef.current) {
           currentLineRef.current = createEmptyLine()
           draw()
-          alert(error instanceof Error ? error.message : String(error))
+          setProcessingError({
+            operation: 'inpaint',
+            details: error instanceof Error ? error.message : String(error),
+            retry: () => {
+              currentLineRef.current = stroke
+              void processStroke()
+            },
+          })
         }
       } finally {
         loading.close()
@@ -281,7 +304,9 @@ export default function Editor(props: EditorProps) {
     }
     const onPointerStart = (ev: PointerEvent) => {
       if (
-        !original.src ||
+        !isOriginalLoaded ||
+        processingBusy.current ||
+        activePointerId !== null ||
         showOriginal ||
         (ev.pointerType === 'mouse' && ev.button !== 0)
       ) {
@@ -290,7 +315,8 @@ export default function Editor(props: EditorProps) {
       ev.preventDefault()
       activePointerId = ev.pointerId
       canvas.setPointerCapture(ev.pointerId)
-      currentLineRef.current.size = brushSize
+      currentLineRef.current.size =
+        brushSize / canvas.getBoundingClientRect().width
       const point = getCanvasPoint(ev)
       onPaint(point.x, point.y)
     }
@@ -299,21 +325,39 @@ export default function Editor(props: EditorProps) {
         return
       }
       activePointerId = null
+      cancelPaintFrame()
+      const point = getCanvasPoint(ev)
+      const lastPoint = currentLineRef.current.pts.at(-1)
+      if (lastPoint?.x !== point.x || lastPoint?.y !== point.y) {
+        currentLineRef.current.pts.push(point)
+      }
+      draw()
       if (canvas.hasPointerCapture(ev.pointerId)) {
         canvas.releasePointerCapture(ev.pointerId)
       }
       void processStroke()
     }
-    const onPointerCancel = (ev: PointerEvent) => {
-      if (activePointerId !== ev.pointerId) {
-        return
-      }
+    const cancelActiveStroke = () => {
+      if (activePointerId === null) return
+      const pointerId = activePointerId
       activePointerId = null
-      if (canvas.hasPointerCapture(ev.pointerId)) {
-        canvas.releasePointerCapture(ev.pointerId)
+      cancelPaintFrame()
+      if (canvas.hasPointerCapture(pointerId)) {
+        canvas.releasePointerCapture(pointerId)
       }
       currentLineRef.current = createEmptyLine()
       draw()
+    }
+    const onPointerCancel = (ev: PointerEvent) => {
+      if (activePointerId === ev.pointerId) cancelActiveStroke()
+    }
+    const onWindowBlur = () => {
+      window.clearTimeout(hideBrushTimeoutRef.current)
+      setShowBrush(false)
+      cancelActiveStroke()
+    }
+    const onVisibilityChange = () => {
+      if (document.hidden) onWindowBlur()
     }
 
     const onPointerEnter = () => {
@@ -326,16 +370,29 @@ export default function Editor(props: EditorProps) {
     canvas.addEventListener('pointermove', onPointerMove)
     canvas.addEventListener('pointerup', onPointerUp)
     canvas.addEventListener('pointercancel', onPointerCancel)
+    canvas.addEventListener('lostpointercapture', onPointerCancel)
     canvas.addEventListener('pointerenter', onPointerEnter)
     canvas.addEventListener('pointerleave', onPointerLeave)
+    window.addEventListener('blur', onWindowBlur)
+    document.addEventListener('visibilitychange', onVisibilityChange)
 
     return () => {
+      cancelPaintFrame()
+      if (activePointerId !== null) {
+        if (canvas.hasPointerCapture(activePointerId)) {
+          canvas.releasePointerCapture(activePointerId)
+        }
+        currentLineRef.current = createEmptyLine()
+      }
       canvas.removeEventListener('pointerdown', onPointerStart)
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerup', onPointerUp)
       canvas.removeEventListener('pointercancel', onPointerCancel)
+      canvas.removeEventListener('lostpointercapture', onPointerCancel)
       canvas.removeEventListener('pointerenter', onPointerEnter)
       canvas.removeEventListener('pointerleave', onPointerLeave)
+      window.removeEventListener('blur', onWindowBlur)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [
     brushSize,
@@ -344,102 +401,114 @@ export default function Editor(props: EditorProps) {
     draw,
     refreshCanvasMask,
     maskCanvas,
-    original.src,
-    renders,
+    isOriginalLoaded,
+    currentRender,
     showOriginal,
     onloading,
     scaledBrushSize,
+    lifetime,
   ])
 
   useEffect(() => {
-    if (!renders.length) return
+    if (!history.entries.length) return
     const frame = window.requestAnimationFrame(() => {
       if (!historyListRef.current) return
+      const selected = historyListRef.current.children[history.index] as
+        HTMLElement | undefined
       historyListRef.current.scrollTo({
-        left: historyListRef.current.scrollWidth,
-        behavior: 'smooth',
+        left: selected
+          ? selected.offsetLeft -
+            historyListRef.current.clientWidth / 2 +
+            selected.offsetWidth / 2
+          : 0,
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches
+          ? 'instant'
+          : 'smooth',
       })
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [renders.length])
-
-  useEffect(() => {
-    setSeparatorLeft(current => Math.min(current, canvasSize.width))
-  }, [canvasSize.width])
-
-  const moveSeparator = useCallback(
-    (clientX: number) => {
-      const rect = context?.canvas.getBoundingClientRect()
-      if (!rect) return
-      setSeparatorLeft(Math.min(rect.width, Math.max(0, clientX - rect.left)))
-    },
-    [context]
-  )
-
-  const onSeparatorPointerDown = (
-    event: React.PointerEvent<HTMLDivElement>
-  ) => {
-    event.preventDefault()
-    event.stopPropagation()
-    event.currentTarget.setPointerCapture(event.pointerId)
-    setUseSeparator(true)
-    moveSeparator(event.clientX)
-  }
-
-  const onSeparatorPointerMove = (
-    event: React.PointerEvent<HTMLDivElement>
-  ) => {
-    if (!useSeparator) return
-    event.preventDefault()
-    moveSeparator(event.clientX)
-  }
-
-  const onSeparatorPointerEnd = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
-    }
-    setUseSeparator(false)
-  }
+  }, [history.index, history.entries])
 
   function download() {
-    const currRender = renders.at(-1) ?? original
+    if (processingBusy.current || !isOriginalLoaded) return
+    const currRender = currentRender ?? original
     const source = currRender.currentSrc || currRender.src
-    downloadImage(source, renders.length ? 'inpaint-result.png' : file.name)
+    downloadImage(
+      source,
+      imageFileName(
+        file.name,
+        currentRender ? 'image/png' : file.type,
+        !!currentRender
+      )
+    )
   }
 
   const undo = useCallback(() => {
+    if (processingBusy.current) return
     currentLineRef.current = createEmptyLine()
-    setRenders(current => current.slice(0, -1))
+    dispatchHistory({ type: 'undo' })
+  }, [])
+
+  const redo = useCallback(() => {
+    if (processingBusy.current) return
+    currentLineRef.current = createEmptyLine()
+    dispatchHistory({ type: 'redo' })
   }, [])
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (!renders.length) {
+      const target = event.target
+      if (
+        processingBusy.current ||
+        event.defaultPrevented ||
+        event.altKey ||
+        event.isComposing ||
+        document.querySelector(
+          'dialog[open], [role="dialog"][aria-modal="true"]'
+        ) ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            target.closest('input, textarea, select, dialog, [role="dialog"]')))
+      ) {
         return
       }
-      const isCmdZ = (event.metaKey || event.ctrlKey) && event.key === 'z'
-      if (isCmdZ) {
+      const key = event.key.toLowerCase()
+      const modifier = event.metaKey || event.ctrlKey
+      const isUndo = modifier && key === 'z' && !event.shiftKey
+      const isRedo =
+        (modifier && key === 'z' && event.shiftKey) ||
+        (event.ctrlKey && !event.metaKey && key === 'y' && !event.shiftKey)
+      if (isUndo && canUndo) {
         event.preventDefault()
         undo()
+      } else if (isRedo && canRedo) {
+        event.preventDefault()
+        redo()
       }
     }
     window.addEventListener('keydown', handler)
     return () => {
       window.removeEventListener('keydown', handler)
     }
-  }, [renders, undo])
+  }, [canUndo, canRedo, undo, redo])
 
   const backTo = useCallback((index: number) => {
+    if (processingBusy.current) return
     currentLineRef.current = createEmptyLine()
-    setRenders(current => current.slice(0, index + 1))
+    dispatchHistory({ type: 'select', index })
   }, [])
 
+  const backHereLabel = message('back_here')
+  const historyStepLabel = message('history_step')
   const History = useMemo(
     () =>
-      renders.map((render, index) => {
+      history.entries.map((render, index) => {
         return (
           <div
             key={render.dataset.id}
+            className={
+              index === history.index ? 'rounded-sm ring-2 ring-primary' : ''
+            }
             style={{
               position: 'relative',
               display: 'inline-block',
@@ -448,14 +517,16 @@ export default function Editor(props: EditorProps) {
           >
             <img
               src={render.src}
-              alt="render"
+              alt={`${historyStepLabel} ${index + 1}`}
               className="rounded-sm"
               style={{
                 height: '90px',
               }}
             />
             <Button
-              ariaLabel={message('back_here')}
+              disabled={isInpaintingLoading}
+              ariaLabel={`${backHereLabel} ${index + 1}`}
+              ariaPressed={index === history.index}
               className="cursor-pointer rounded-sm opacity-100 sm:opacity-0 sm:hover:opacity-100 sm:focus-visible:opacity-100"
               style={{
                 position: 'absolute',
@@ -469,8 +540,12 @@ export default function Editor(props: EditorProps) {
                 justifyContent: 'center',
               }}
               onClick={() => backTo(index)}
-              onEnter={() => draw(index)}
-              onLeave={draw}
+              onEnter={() => {
+                if (!processingBusy.current) draw(index)
+              }}
+              onLeave={() => {
+                if (!processingBusy.current) draw()
+              }}
             >
               <div
                 style={{
@@ -479,19 +554,27 @@ export default function Editor(props: EditorProps) {
                   textAlign: 'center',
                 }}
               >
-                {message('back_here')}
+                {backHereLabel}
               </div>
             </Button>
           </div>
         )
       }),
-    [renders, backTo, draw]
+    [
+      history,
+      backTo,
+      draw,
+      isInpaintingLoading,
+      backHereLabel,
+      historyStepLabel,
+    ]
   )
 
   const handleSliderStart = () => {
     setShowBrush(true)
   }
   const handleSliderChange = (sliderValue: number) => {
+    setShowBrush(true)
     if (brushRef.current) {
       const x = document.documentElement.clientWidth / 2 - sliderValue / 2
       const y = document.documentElement.clientHeight / 2 - sliderValue / 2
@@ -506,8 +589,12 @@ export default function Editor(props: EditorProps) {
   }
 
   const onSuperResolution = useCallback(async () => {
-    if (upscaleBusy.current) return
-    upscaleBusy.current = true
+    if (processingBusy.current || !isOriginalLoaded) return
+    const source = currentRender ?? original
+    const plan = getUpscalePlan(source.naturalWidth, source.naturalHeight)
+    if (!plan.ok) return
+    processingBusy.current = true
+    setProcessingError(undefined)
     setInpaintStage(null)
     setUpscaleStatus({ stage: 'processing_model' })
     setGenerateProgress(0)
@@ -528,7 +615,7 @@ export default function Editor(props: EditorProps) {
       const start = Date.now()
       console.log('superResolution_start')
       // each time based on the last result, the first is the original
-      const newFile = renders.at(-1) ?? file
+      const newFile = currentRender ?? file
       const { default: superResolution } =
         await import('./adapters/superResolution')
       const res = await superResolution(
@@ -538,18 +625,18 @@ export default function Editor(props: EditorProps) {
         },
         status => {
           if (mountedRef.current) setUpscaleStatus(status)
-        }
+        },
+        lifetime.signal
       )
       if (!res) {
         throw new Error('empty response')
       }
-      // TODO: fix the render if it failed loading
       const newRender = new Image()
       newRender.dataset.id = Date.now().toString()
-      await loadImage(newRender, res)
+      await loadImage(newRender, res, lifetime.signal)
       if (!mountedRef.current) return
       currentLineRef.current = createEmptyLine()
-      setRenders(current => [...current, newRender])
+      dispatchHistory({ type: 'append', entry: newRender })
       console.log('superResolution_processed', {
         duration: Date.now() - start,
       })
@@ -558,31 +645,35 @@ export default function Editor(props: EditorProps) {
     } catch (error) {
       console.error('superResolution', error)
       if (mountedRef.current) {
-        alert(error instanceof Error ? error.message : String(error))
+        setProcessingError({
+          operation: 'upscale',
+          details: error instanceof Error ? error.message : String(error),
+        })
       }
     } finally {
-      upscaleBusy.current = false
+      processingBusy.current = false
       if (mountedRef.current) {
         setUpscaleStatus(undefined)
         setDownloaded(true)
         setIsProcessingLoading(false)
       }
     }
-  }, [file, renders])
+  }, [file, currentRender, original, isOriginalLoaded, lifetime])
 
   return (
     <div
+      aria-busy={isInpaintingLoading || (!isOriginalLoaded && !imageError)}
       className={[
         'editor-shell theme-surface flex h-full min-h-0 flex-col items-center overflow-hidden bg-canvas px-3 sm:px-6',
         isInpaintingLoading ? 'pointer-events-none' : '',
       ].join(' ')}
     >
       {/* History */}
-      {renders.length > 0 && (
+      {history.entries.length > 0 && (
         <div
           ref={historyListRef}
           className={[
-            'theme-surface history-scrollbar mt-3 flex h-28 w-full max-w-5xl flex-none flex-row items-center gap-4 overflow-x-auto rounded-2xl border border-line bg-panel p-3 shadow-sm',
+            'theme-surface history-scrollbar relative mt-3 flex h-28 w-full max-w-5xl flex-none flex-row items-center gap-4 overflow-x-auto rounded-2xl border border-line bg-panel p-3 shadow-sm',
           ].join(' ')}
         >
           {History}
@@ -595,6 +686,18 @@ export default function Editor(props: EditorProps) {
         ].join(' ')}
         ref={canvasDiv}
       >
+        {!isOriginalLoaded && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 bg-canvas p-6 text-center">
+            {imageError ? (
+              <>
+                <p role="alert">{message('editor_image_failed')}</p>
+                <Button onClick={retryImage}>{message('repair_retry')}</Button>
+              </>
+            ) : (
+              <p role="status">{message('editor_image_loading')}</p>
+            )}
+          </div>
+        )}
         <div className="relative flex items-center justify-center">
           <canvas
             className="touch-none rounded-xl shadow-2xl shadow-black/20"
@@ -608,74 +711,7 @@ export default function Editor(props: EditorProps) {
               }
             }}
           />
-          <div
-            className={[
-              'absolute top-0 right-0 pointer-events-none',
-              showOriginal ? '' : 'overflow-hidden',
-            ].join(' ')}
-            style={{
-              width: showOriginal ? `${canvasSize.width}px` : '0px',
-              height: canvasSize.height,
-              transitionProperty: 'width, height',
-              transitionTimingFunction: 'cubic-bezier(0.4, 0, 0.2, 1)',
-              transitionDuration: '300ms',
-            }}
-          >
-            <div
-              className={[
-                'absolute top-0 right-0 pointer-events-none z-10',
-                useSeparator
-                  ? 'bg-ink text-canvas'
-                  : 'bg-primary text-primary-ink',
-                'w-1',
-                'flex items-center justify-center',
-                'separator',
-              ].join(' ')}
-              style={{
-                left: `${separatorLeft}px`,
-                height: canvasSize.height,
-                transitionProperty: 'width, height',
-                transitionTimingFunction: 'cubic-bezier(0.4, 0, 0.2, 1)',
-                transitionDuration: '300ms',
-              }}
-            >
-              <span className="absolute bottom-0 left-2 rounded-lg bg-black/60 px-2 py-1 text-xs font-bold text-white select-none">
-                original
-              </span>
-              <div
-                className={[
-                  'theme-control pointer-events-auto absolute rounded-xl px-1 py-3 shadow-lg',
-                  useSeparator
-                    ? 'bg-ink text-canvas'
-                    : 'bg-primary text-primary-ink',
-                ].join(' ')}
-                style={{ cursor: 'ew-resize' }}
-                ref={separatorRef}
-                onPointerDown={onSeparatorPointerDown}
-                onPointerMove={onSeparatorPointerMove}
-                onPointerUp={onSeparatorPointerEnd}
-                onPointerCancel={onSeparatorPointerEnd}
-              >
-                <ViewBoardsIcon
-                  className="w-5 h-5"
-                  style={{ cursor: 'ew-resize' }}
-                />
-              </div>
-            </div>
-            <img
-              className="absolute right-0"
-              src={original.src}
-              alt="original"
-              width={canvasSize.width}
-              height={canvasSize.height}
-              style={{
-                width: `${canvasSize.width}px`,
-                height: `${canvasSize.height}px`,
-                maxWidth: 'none',
-                clipPath: `inset(0 0 0 ${separatorLeft}px)`,
-              }}
-            />
-          </div>
+          {showOriginal && <ImageComparison source={original.src} />}
           {isInpaintingLoading && (
             <div className="theme-surface absolute inset-0 z-10 flex h-full w-full items-center justify-center rounded-xl bg-panel/90 backdrop-blur-sm">
               <div
@@ -698,7 +734,10 @@ export default function Editor(props: EditorProps) {
                         : `${message('upscale_tile')} ${upscaleStatus?.tile ?? 1} / ${upscaleStatus?.total ?? 1}`}
                     </p>
                     {!upscaleStatus?.stage && (
-                      <Progress percent={generateProgress} />
+                      <Progress
+                        percent={generateProgress}
+                        label={message('upscale')}
+                      />
                     )}
                     <p className="text-xs text-muted">
                       {message('upscale_wait')}
@@ -717,52 +756,79 @@ export default function Editor(props: EditorProps) {
             <p className="text-lg font-bold leading-7">
               {message('upscaleing_model_download_message')}
             </p>
-            <Progress percent={downloadProgress} />
+            <Progress
+              percent={downloadProgress}
+              label={message('upscaleing_model_download_message')}
+            />
           </div>
         </Modal>
       )}
-      {showBrush && (
-        <div
-          className="fixed left-0 top-0 rounded-full border border-white/50 bg-red-500/45 shadow-[0_0_0_1px_rgba(0,0,0,0.25)] pointer-events-none"
-          style={{
-            width: `${scaledBrushSize}px`,
-            height: `${scaledBrushSize}px`,
-            transform: `translate3d(-100px, -100px, 0)`,
-          }}
-          ref={brushRef}
-        />
-      )}
-      {/* 工具栏 */}
       <div
+        hidden={!showBrush}
+        aria-hidden="true"
+        className="fixed left-0 top-0 rounded-full border border-white/50 bg-red-500/45 shadow-[0_0_0_1px_rgba(0,0,0,0.25)] pointer-events-none"
+        style={{
+          width: `${scaledBrushSize}px`,
+          height: `${scaledBrushSize}px`,
+          transform: `translate3d(-100px, -100px, 0)`,
+        }}
+        ref={brushRef}
+      />
+      {/* 工具栏 */}
+      {isOriginalLoaded && (
+        <p
+          id="upscale-details"
+          className="mb-2 w-full max-w-5xl text-center text-xs leading-5 text-muted"
+        >
+          {sourceImage.naturalWidth} × {sourceImage.naturalHeight} px
+          {' · '}
+          {upscalePlan.ok
+            ? `${message('upscale_output')}: ${upscalePlan.width} × ${upscalePlan.height} px`
+            : message(upscalePlan.reason)}
+        </p>
+      )}
+      <fieldset
+        disabled={isInpaintingLoading || !isOriginalLoaded}
+        aria-label={message('editor_tools')}
         className={[
-          'toolbar-enter theme-surface mb-3 grid w-full max-w-5xl flex-none grid-cols-2 items-center gap-2 rounded-2xl border border-line bg-panel/95 p-3 shadow-xl backdrop-blur-xl',
-          'sm:flex sm:flex-row sm:justify-between sm:gap-3',
+          'toolbar-enter theme-surface mb-3 grid min-w-0 w-full max-w-5xl flex-none grid-cols-2 items-center gap-2 rounded-2xl border border-line bg-panel/95 p-3 shadow-xl backdrop-blur-xl',
+          'sm:flex sm:flex-row sm:flex-wrap sm:justify-between sm:gap-3',
         ].join(' ')}
       >
-        {renders.length > 0 && (
-          <Button
-            primary
-            className="w-full sm:w-auto"
-            onClick={undo}
-            icon={
-              <svg
-                aria-hidden="true"
-                className="w-6 h-6"
-                width="19"
-                height="9"
-                viewBox="0 0 19 9"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <path
-                  d="M2 1C2 0.447715 1.55228 0 1 0C0.447715 0 0 0.447715 0 1H2ZM1 8H0V9H1V8ZM8 9C8.55228 9 9 8.55229 9 8C9 7.44771 8.55228 7 8 7V9ZM16.5963 7.42809C16.8327 7.92721 17.429 8.14016 17.9281 7.90374C18.4272 7.66731 18.6402 7.07103 18.4037 6.57191L16.5963 7.42809ZM16.9468 5.83205L17.8505 5.40396L16.9468 5.83205ZM0 1V8H2V1H0ZM1 9H8V7H1V9ZM1.66896 8.74329L6.66896 4.24329L5.33104 2.75671L0.331035 7.25671L1.66896 8.74329ZM16.043 6.26014L16.5963 7.42809L18.4037 6.57191L17.8505 5.40396L16.043 6.26014ZM6.65079 4.25926C9.67554 1.66661 14.3376 2.65979 16.043 6.26014L17.8505 5.40396C15.5805 0.61182 9.37523 -0.710131 5.34921 2.74074L6.65079 4.25926Z"
-                  fill="currentColor"
-                />
-              </svg>
-            }
-          >
-            {message('undo')}
-          </Button>
+        {history.entries.length > 0 && (
+          <div className="col-span-2 flex items-center justify-center gap-2">
+            <Button
+              disabled={!canUndo}
+              className="w-full sm:w-auto"
+              onClick={undo}
+              icon={
+                <svg
+                  aria-hidden="true"
+                  className="w-6 h-6"
+                  width="19"
+                  height="9"
+                  viewBox="0 0 19 9"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    d="M2 1C2 0.447715 1.55228 0 1 0C0.447715 0 0 0.447715 0 1H2ZM1 8H0V9H1V8ZM8 9C8.55228 9 9 8.55229 9 8C9 7.44771 8.55228 7 8 7V9ZM16.5963 7.42809C16.8327 7.92721 17.429 8.14016 17.9281 7.90374C18.4272 7.66731 18.6402 7.07103 18.4037 6.57191L16.5963 7.42809ZM16.9468 5.83205L17.8505 5.40396L16.9468 5.83205ZM0 1V8H2V1H0ZM1 9H8V7H1V9ZM1.66896 8.74329L6.66896 4.24329L5.33104 2.75671L0.331035 7.25671L1.66896 8.74329ZM16.043 6.26014L16.5963 7.42809L18.4037 6.57191L17.8505 5.40396L16.043 6.26014ZM6.65079 4.25926C9.67554 1.66661 14.3376 2.65979 16.043 6.26014L17.8505 5.40396C15.5805 0.61182 9.37523 -0.710131 5.34921 2.74074L6.65079 4.25926Z"
+                    fill="currentColor"
+                  />
+                </svg>
+              }
+            >
+              {message('undo')}
+            </Button>
+            <Button
+              disabled={!canRedo}
+              className="w-full sm:w-auto"
+              onClick={redo}
+              icon={<ReplyIcon className="h-6 w-6 -scale-x-100" />}
+            >
+              {message('redo')}
+            </Button>
+          </div>
         )}
         <div className="col-span-2 flex justify-center sm:contents">
           <Slider
@@ -776,17 +842,23 @@ export default function Editor(props: EditorProps) {
         </div>
         <Button
           primary={showOriginal}
+          ariaPressed={showOriginal}
           className="w-full sm:w-auto"
           icon={<EyeIcon className="w-6 h-6" />}
           onClick={() => {
-            setShowOriginal(!showOriginal)
-            setSeparatorLeft(0)
+            setShowBrush(false)
+            setShowOriginal(current => !current)
           }}
         >
           {message('original')}
         </Button>
         {!showOriginal && (
-          <Button className="w-full sm:w-auto" onClick={onSuperResolution}>
+          <Button
+            className="w-full sm:w-auto"
+            disabled={!upscalePlan.ok}
+            ariaDescribedBy="upscale-details"
+            onClick={onSuperResolution}
+          >
             {message('upscale')}
           </Button>
         )}
@@ -799,7 +871,42 @@ export default function Editor(props: EditorProps) {
         >
           {message('download')}
         </Button>
-      </div>
+      </fieldset>
+      {processingError && (
+        <Modal
+          ariaLabel={message('processing_failed')}
+          onClose={() => setProcessingError(undefined)}
+        >
+          <div className="space-y-4">
+            <h2 className="text-xl font-black">
+              {message('processing_failed')}
+            </h2>
+            <p className="text-sm leading-6 text-muted">
+              {message(
+                processingError.operation === 'inpaint'
+                  ? 'inpaint_failed_hint'
+                  : 'processing_failed_hint'
+              )}
+            </p>
+            <p role="alert" className="break-words text-sm text-muted">
+              {processingError.details}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                primary
+                onClick={
+                  processingError.operation === 'upscale'
+                    ? onSuperResolution
+                    : processingError.retry
+                }
+              >
+                {message('repair_retry')}
+              </Button>
+              <RepairRuntime />
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }

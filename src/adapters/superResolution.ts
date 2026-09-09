@@ -1,9 +1,12 @@
+import { loadImage as decodeImage } from '../utils'
 /* eslint-disable no-console */
 /* eslint-disable no-plusplus */
-import type { Mat } from 'opencv-ts'
-import cv, { ensureOpenCV } from './opencv'
+import { ensureOpenCV } from './opencv'
+import { readRGB } from './preprocess'
 import type { InferenceSession, Tensor } from 'onnxruntime-web'
 import { getSession, withRuntime, type SessionStage } from './runtime'
+import { getUpscalePlan } from '../imageSize'
+import { message } from '../i18n'
 
 export type UpscaleStage =
   | SessionStage
@@ -16,14 +19,11 @@ export interface UpscaleStatus {
   total?: number
 }
 
-function loadImage(url: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.crossOrigin = 'Anonymous'
-    img.onload = () => resolve(img)
-    img.onerror = () => reject(new Error(`Failed to load image from ${url}`))
-    img.src = url
-  })
+async function loadImage(url: string): Promise<HTMLImageElement> {
+  const image = new Image()
+  image.crossOrigin = 'Anonymous'
+  await decodeImage(image, url)
+  return image
 }
 
 async function loadFileImage(file: File) {
@@ -34,29 +34,6 @@ async function loadFileImage(file: File) {
     URL.revokeObjectURL(objectUrl)
   }
 }
-function imgProcess(img: Mat) {
-  const channels = new cv.MatVector()
-  cv.split(img, channels) // 分割通道
-
-  const C = channels.size() // 通道数
-  const H = img.rows // 图像高度
-  const W = img.cols // 图像宽度
-
-  const chwArray = new Float32Array(C * H * W) // 创建新的数组来存储转换后的数据
-
-  for (let c = 0; c < C; c++) {
-    const channelData = channels.get(c).data // 获取单个通道的数据
-    for (let h = 0; h < H; h++) {
-      for (let w = 0; w < W; w++) {
-        chwArray[c * H * W + h * W + w] = channelData[h * W + w] / 255.0
-        // chwArray[c * H * W + h * W + w] = channelData[h * W + w]
-      }
-    }
-  }
-
-  channels.delete() // 清理内存
-  return chwArray // 返回转换后的数据
-}
 export async function tileProc(
   inputTensor: Tensor,
   session: InferenceSession,
@@ -66,13 +43,33 @@ export async function tileProc(
   const inputDims = inputTensor.dims
   const imageW = inputDims[3]
   const imageH = inputDims[2]
+  if (
+    inputDims.length !== 4 ||
+    inputDims[0] !== 1 ||
+    inputDims[1] !== 3 ||
+    !Number.isInteger(imageW) ||
+    !Number.isInteger(imageH) ||
+    imageW < 1 ||
+    imageH < 1
+  ) {
+    throw new Error('Expected a positive 1 × 3 × height × width input shape')
+  }
+  const { data } = inputTensor
+  if (!(data instanceof Float32Array)) {
+    throw new TypeError('Expected a float32 input tensor')
+  }
+  if (data.length !== imageW * imageH * 3) {
+    throw new Error('Input tensor data length does not match its shape')
+  }
+  const plan = getUpscalePlan(imageW, imageH)
+  if (!plan.ok) throw new Error(message(plan.reason))
 
   const rOffset = 0
   const gOffset = imageW * imageH
   const bOffset = imageW * imageH * 2
 
-  const outImageW = inputDims[3] * 4
-  const outImageH = inputDims[2] * 4
+  const outImageW = plan.width
+  const outImageH = plan.height
   const outputData = new Uint8ClampedArray(outImageW * outImageH * 4)
 
   const tileSize = 64
@@ -82,32 +79,24 @@ export async function tileProc(
   const tilesx = Math.ceil(inputDims[3] / tileSizePre)
   const tilesy = Math.ceil(inputDims[2] / tileSizePre)
 
-  const { data } = inputTensor
-  if (!(data instanceof Float32Array)) {
-    throw new TypeError('Expected a float32 input tensor')
-  }
-
-  console.log(inputTensor)
   const numTiles = tilesx * tilesy
   let currentTile = 0
+  const tileData = new Float32Array(tileSize * tileSize * 3)
 
   for (let i = 0; i < tilesx; i++) {
     for (let j = 0; j < tilesy; j++) {
       onStatus?.({ tile: currentTile + 1, total: numTiles })
       // WASM inference can occupy the main thread. Paint status before each tile.
       await new Promise(resolve => setTimeout(resolve, 16))
-      const ti = Date.now()
       const tileW = Math.min(tileSizePre, imageW - i * tileSizePre)
       const tileH = Math.min(tileSizePre, imageH - j * tileSizePre)
-      console.log(`tileW: ${tileW} tileH: ${tileH}`)
       const tileROffset = 0
       const tileGOffset = tileSize * tileSize
       const tileBOffset = tileSize * tileSize * 2
 
       // padding tile 转移到上面的数据上
-      const tileData = new Float32Array(tileSize * tileSize * 3)
-      for (let xp = -tilePadding; xp < tileSizePre + tilePadding; xp++) {
-        for (let yp = -tilePadding; yp < tileSizePre + tilePadding; yp++) {
+      for (let yp = -tilePadding; yp < tileSizePre + tilePadding; yp++) {
+        for (let xp = -tilePadding; xp < tileSizePre + tilePadding; xp++) {
           // 计算在data中的一维坐标，防止边缘溢出
           let xim = i * tileSizePre + xp
           if (xim < 0) xim = 0
@@ -143,16 +132,16 @@ export async function tileProc(
       if (!(results.output?.data instanceof Float32Array)) {
         throw new TypeError('Expected a float32 output tensor')
       }
-      console.log(`pre dims:${results.output.dims}`)
 
       const outTileW = tileW * 4
       const outTileH = tileH * 4
       const outTileSize = tileSize * 4
       if (
-        results.output.dims.join(',') !== `1,3,${outTileSize},${outTileSize}`
+        results.output.dims.join(',') !== `1,3,${outTileSize},${outTileSize}` ||
+        results.output.data.length !== 3 * outTileSize * outTileSize
       ) {
         throw new Error(
-          `Unexpected 4x model output shape: ${results.output.dims.join(' × ')}`
+          `Unexpected 4x model output shape or data length: ${results.output.dims.join(' × ')}`
         )
       }
       const outTileSizePre = tileSizePre * 4
@@ -162,8 +151,8 @@ export async function tileProc(
       const outTileBOffset = outTileSize * outTileSize * 2
 
       // add tile to output，直接输出
-      for (let x = 0; x < outTileW; x++) {
-        for (let y = 0; y < outTileH; y++) {
+      for (let y = 0; y < outTileH; y++) {
+        for (let x = 0; x < outTileW; x++) {
           const xim = i * outTileSizePre + x
           const yim = j * outTileSizePre + y
           const outputIndex = (xim + yim * outImageW) * 4
@@ -179,56 +168,26 @@ export async function tileProc(
         }
       }
       currentTile++
-      const dt = Date.now() - ti
-      const remTime = (numTiles - currentTile) * dt
-      console.log(
-        `tile ${currentTile} of ${numTiles} took ${dt} ms, remaining time: ${remTime} ms`
-      )
       callback(Math.round(100 * (currentTile / numTiles)))
     }
   }
   return new ImageData(outputData, outImageW, outImageH)
 }
-function processImage(
-  img: HTMLImageElement,
-  canvasId?: string
-): Promise<Float32Array> {
-  return new Promise((resolve, reject) => {
-    let src: Mat | undefined
-    let srcRgb: Mat | undefined
-    try {
-      src = cv.imread(img)
-      srcRgb = new cv.Mat()
-      // 将图像从RGBA转换为RGB
-      cv.cvtColor(src, srcRgb, cv.COLOR_RGBA2RGB)
-      if (canvasId) {
-        cv.imshow(canvasId, srcRgb)
-      }
-      resolve(imgProcess(srcRgb))
-    } catch (error) {
-      reject(error)
-    } finally {
-      src?.delete()
-      srcRgb?.delete()
-    }
-  })
-}
-
 function imageDataToDataURL(imageData: ImageData) {
   // 创建 canvas
   const canvas = document.createElement('canvas')
   canvas.width = imageData.width
   canvas.height = imageData.height
 
-  // 绘制 imageData 到 canvas
-  const ctx = canvas.getContext('2d')
-  if (!ctx) {
-    throw new Error('Unable to get canvas context')
+  try {
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Unable to get canvas context')
+    ctx.putImageData(imageData, 0, 0)
+    return canvas.toDataURL()
+  } finally {
+    canvas.width = 0
+    canvas.height = 0
   }
-  ctx.putImageData(imageData, 0, 0)
-
-  // 导出为数据 URL
-  return canvas.toDataURL()
 }
 async function superResolution(
   imageFile: File | HTMLImageElement,
@@ -239,12 +198,8 @@ async function superResolution(
     imageFile instanceof HTMLImageElement
       ? imageFile
       : await loadFileImage(imageFile)
-  const outputPixelCount = img.width * 4 * img.height * 4
-  if (outputPixelCount > 20_000_000) {
-    throw new Error(
-      'This image is too large for 4x upscaling in the browser. Use an image smaller than about 1.25 megapixels.'
-    )
-  }
+  const plan = getUpscalePlan(img.naturalWidth, img.naturalHeight)
+  if (!plan.ok) throw new Error(message(plan.reason))
 
   console.time('sessionCreate')
   const [session] = await Promise.all([
@@ -254,26 +209,30 @@ async function superResolution(
   console.timeEnd('sessionCreate')
 
   onStatus?.({ stage: 'processing_prepare' })
-  const imageTersorData = await processImage(img)
-  const imageTensor = new ort.Tensor('float32', imageTersorData, [
+  const imageTensorData = readRGB(img, true)
+  const imageTensor = new ort.Tensor('float32', imageTensorData, [
     1,
     3,
-    img.height,
-    img.width,
+    img.naturalHeight,
+    img.naturalWidth,
   ])
 
   const imageData = await tileProc(imageTensor, session, callback, onStatus)
   onStatus?.({ stage: 'processing_output' })
   console.time('postProcess')
-  console.log(imageData, 'imageData')
   const url = imageDataToDataURL(imageData)
   console.timeEnd('postProcess')
 
   return url
 }
 
-export default function run(...args: Parameters<typeof superResolution>) {
+export default function run(
+  imageFile: File | HTMLImageElement,
+  callback: (progress: number) => void,
+  onStatus?: (status: UpscaleStatus) => void,
+  signal?: AbortSignal
+) {
   return withRuntime(async () => {
-    return superResolution(...args)
-  })
+    return superResolution(imageFile, callback, onStatus)
+  }, signal)
 }

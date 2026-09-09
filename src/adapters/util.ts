@@ -1,29 +1,38 @@
 export async function checkWebgpu() {
-  if (!navigator.gpu) {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    if (!navigator.gpu) return false
+    return await Promise.race([
+      navigator.gpu.requestAdapter().then(adapter => Boolean(adapter)),
+      // A stalled driver probe must not prevent the WASM fallback from loading.
+      new Promise<boolean>(resolve => {
+        timeout = setTimeout(() => resolve(false), 5_000)
+      }),
+    ])
+  } catch {
     return false
+  } finally {
+    clearTimeout(timeout)
   }
-  const adapter = await navigator.gpu.requestAdapter().catch(() => null)
-  if (!adapter) {
-    return false
-  }
-  return true
 }
 export const wasm = () =>
   typeof WebAssembly === 'object' &&
   typeof WebAssembly.instantiate === 'function'
 export const threads = () =>
   (async e => {
+    let channel: MessageChannel | undefined
     try {
       if (typeof MessageChannel === 'undefined') {
         return false
       }
-      const channel = new MessageChannel()
+      channel = new MessageChannel()
       channel.port1.postMessage(new SharedArrayBuffer(1))
-      channel.port1.close()
-      channel.port2.close()
       return WebAssembly.validate(e)
     } catch {
       return false
+    } finally {
+      channel?.port1.close()
+      channel?.port2.close()
     }
   })(
     new Uint8Array([
@@ -80,19 +89,35 @@ async function loadScript(src: string) {
   script.src = src
   script.crossOrigin = 'anonymous'
   await new Promise<void>((resolve, reject) => {
-    const fail = () => {
+    let settled = false
+    const cleanup = () => {
       clearTimeout(timeout)
+      script.onload = null
+      script.onerror = null
+    }
+    const fail = () => {
+      if (settled) return
+      settled = true
+      cleanup()
       script.remove()
       reject(new Error(`Failed to load ONNX Runtime from ${src}`))
     }
     const timeout = setTimeout(fail, 30_000)
     script.onload = () => {
-      clearTimeout(timeout)
+      if (settled) return
       if (typeof ort === 'undefined') fail()
-      else resolve()
+      else {
+        settled = true
+        cleanup()
+        resolve()
+      }
     }
     script.onerror = fail
-    document.head.appendChild(script)
+    try {
+      document.head.appendChild(script)
+    } catch {
+      fail()
+    }
   })
 }
 
@@ -109,11 +134,16 @@ export const loadingOnnxruntime = (
   if (typeof ort !== 'undefined') return Promise.resolve()
   runtimeLoading = (async () => {
     const src = compatible ? `${runtimeBase}ort.wasm.min.js` : await getTagSrc()
+    const primaryBase = src.slice(0, src.lastIndexOf('/') + 1)
+    const backupBase = primaryBase.includes('cdn.jsdelivr.net')
+      ? `https://unpkg.com/onnxruntime-web@${version}/dist/`
+      : `https://cdn.jsdelivr.net/npm/onnxruntime-web@${version}/dist/`
     try {
       await loadScript(src)
+      runtimeBase = primaryBase
     } catch {
-      runtimeBase = `https://unpkg.com/onnxruntime-web@${version}/dist/`
-      await loadScript(`${runtimeBase}${src.split('/').pop()}`)
+      await loadScript(`${backupBase}${src.split('/').pop()}`)
+      runtimeBase = backupBase
     }
   })().finally(() => {
     runtimeLoading = undefined

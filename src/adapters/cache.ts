@@ -77,13 +77,27 @@ export async function ensureModel(modelType: modelType) {
   return model
 }
 
-type ProgressListener = (progress: number) => void
+export type DownloadProgress = number | null
+type ProgressListener = (progress: DownloadProgress) => void
+
+function notifyProgress(
+  listener: ProgressListener,
+  progress: DownloadProgress
+) {
+  try {
+    listener(progress)
+  } catch (error) {
+    // Observers must not interrupt a download shared by other callers.
+    console.error('Model download progress callback failed', error)
+  }
+}
+
 const pendingDownloads = new Map<
   modelType,
   {
     promise: Promise<void>
     listeners: Set<ProgressListener>
-    progress: number
+    progress: DownloadProgress
   }
 >()
 
@@ -96,18 +110,18 @@ export async function downloadModel(
     const task = {
       promise: Promise.resolve(),
       listeners: new Set<ProgressListener>(),
-      progress: 0,
+      progress: null as DownloadProgress,
     }
     pendingDownloads.set(modelType, task)
     task.promise = downloadAndCacheModel(modelType, progress => {
       task.progress = progress
-      for (const listener of task.listeners) listener(progress)
+      for (const listener of task.listeners) notifyProgress(listener, progress)
     }).finally(() => pendingDownloads.delete(modelType))
     pending = task
   }
   pending.listeners.add(setDownloadProgress)
   try {
-    setDownloadProgress(pending.progress)
+    notifyProgress(setDownloadProgress, pending.progress)
     await pending.promise
   } finally {
     pending.listeners.delete(setDownloadProgress)
@@ -116,7 +130,7 @@ export async function downloadModel(
 
 async function downloadAndCacheModel(
   modelType: modelType,
-  setDownloadProgress: (arg0: number) => void
+  setDownloadProgress: ProgressListener
 ) {
   if (await modelExists(modelType)) {
     setDownloadProgress(100)
@@ -124,10 +138,11 @@ async function downloadAndCacheModel(
   }
 
   async function downloadFromUrl(url: string) {
-    setDownloadProgress(0)
+    setDownloadProgress(null)
     const controller = new AbortController()
     // Reset on each chunk so slow but active downloads can finish.
     let timeout = setTimeout(() => controller.abort(), 30_000)
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     try {
       const response = await fetch(url, { signal: controller.signal })
       if (!response.ok) {
@@ -137,7 +152,8 @@ async function downloadAndCacheModel(
         throw new Error('Model download response has no body')
       }
       const fullSize = Number(response.headers.get('content-length'))
-      const reader = response.body.getReader()
+      if (Number.isFinite(fullSize) && fullSize > 0) setDownloadProgress(0)
+      reader = response.body.getReader()
       const total: Uint8Array[] = []
       let downloaded = 0
 
@@ -162,7 +178,6 @@ async function downloadAndCacheModel(
       }
 
       clearTimeout(timeout)
-      reader.releaseLock()
       if (downloaded === 0) throw new Error('Downloaded model is empty')
       const buffer = new Uint8Array(downloaded)
       let offset = 0
@@ -171,11 +186,11 @@ async function downloadAndCacheModel(
         offset += chunk.length
       }
 
-      await saveModel(modelType, buffer.buffer)
-      setDownloadProgress(100)
+      return buffer.buffer
     } finally {
       clearTimeout(timeout)
       controller.abort()
+      reader?.releaseLock()
     }
   }
 
@@ -183,12 +198,17 @@ async function downloadAndCacheModel(
   const urls = [model.url, model.backupUrl].filter(Boolean)
   const errors: unknown[] = []
   for (const url of urls) {
+    let buffer: ArrayBuffer
     try {
-      await downloadFromUrl(url)
-      return
+      buffer = await downloadFromUrl(url)
     } catch (error) {
       errors.push(error)
+      continue
     }
+    // A storage failure cannot be fixed by downloading the same bytes again.
+    await saveModel(modelType, buffer)
+    setDownloadProgress(100)
+    return
   }
 
   const details = errors

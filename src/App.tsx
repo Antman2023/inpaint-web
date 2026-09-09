@@ -6,80 +6,65 @@ import {
   MoonIcon,
   SunIcon,
 } from '@heroicons/react/outline'
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import Button from './components/Button'
 import FileSelect from './components/FileSelect'
+import EditorBoundary from './components/EditorBoundary'
 import Modal from './components/Modal'
-import { resizeImageFile, useClickAway } from './utils'
-import Progress from './components/Progress'
-import { downloadModel } from './adapters/cache'
 import { type LanguageTag, languageTag, message, setLanguageTag } from './i18n'
 import { useTheme } from './theme'
 import RepairRuntime from './components/RepairRuntime'
+import { createImageImporter, type ImageImportState } from './imageImport'
 
 const EXAMPLE_IMAGES = ['bag', 'dog', 'car', 'bird', 'jacket', 'shoe', 'paris']
 const Editor = lazy(() => import('./Editor'))
 
 function App() {
-  const [file, setFile] = useState<File>()
+  const [imageImport, setImageImport] = useState<ImageImportState>({
+    status: 'idle',
+  })
+  const [importer] = useState(() => createImageImporter(setImageImport))
+  const file = imageImport.status === 'ready' ? imageImport.file : undefined
+  useEffect(() => () => importer.dispose(), [importer])
   const [stateLanguageTag, setStateLanguageTag] =
     useState<LanguageTag>(languageTag())
 
   const [showAbout, setShowAbout] = useState(false)
-  const modalRef = useRef<HTMLDivElement>(null)
 
-  const [downloadProgress, setDownloadProgress] = useState(100)
-  const [modelDownloadError, setModelDownloadError] = useState<string>()
   const { theme, toggleTheme } = useTheme()
-
-  function preloadInpaintModel() {
-    setModelDownloadError(undefined)
-    void downloadModel('inpaint', setDownloadProgress).catch(error => {
-      setDownloadProgress(100)
-      setModelDownloadError(
-        error instanceof Error ? error.message : String(error)
-      )
-    })
-  }
-
-  useEffect(preloadInpaintModel, [])
 
   useEffect(() => {
     document.documentElement.lang = stateLanguageTag === 'zh' ? 'zh-CN' : 'en'
   }, [stateLanguageTag])
 
-  useClickAway(modalRef, () => {
-    setShowAbout(false)
-  })
-
   useEffect(() => {
-    if (!showAbout) return
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setShowAbout(false)
+    const preventFileNavigation = (event: DragEvent) => {
+      if (
+        event.defaultPrevented ||
+        !event.dataTransfer?.types.includes('Files')
+      )
+        return
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'none'
     }
-    window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [showAbout])
-
-  async function startWithDemoImage(img: string) {
-    const response = await fetch(`/examples/${img}.jpeg`)
-    if (!response.ok) {
-      throw new Error(`${message('example_load_failed')} (${response.status})`)
+    window.addEventListener('dragover', preventFileNavigation)
+    window.addEventListener('drop', preventFileNavigation)
+    return () => {
+      window.removeEventListener('dragover', preventFileNavigation)
+      window.removeEventListener('drop', preventFileNavigation)
     }
-    const imgBlob = await response.blob()
-    setFile(new File([imgBlob], `${img}.jpeg`, { type: 'image/jpeg' }))
-  }
+  }, [])
 
   return (
     <div className="app-shell theme-surface flex min-h-full flex-col bg-canvas text-ink">
       <header className="app-header theme-surface z-30 grid h-16 flex-none grid-cols-[1fr_auto_1fr] items-center border-b border-line bg-panel/90 px-2 backdrop-blur-xl sm:px-4">
         <div className="flex min-w-0 justify-start">
           <Button
-            disabled={!file}
+            disabled={imageImport.status === 'idle'}
             ariaLabel={message('start_new')}
             className="!px-2 sm:!px-3"
             icon={<ArrowLeftIcon className="h-5 w-5" />}
-            onClick={() => setFile(undefined)}
+            onClick={importer.cancel}
           >
             <span className="hidden sm:inline">{message('start_new')}</span>
           </Button>
@@ -87,7 +72,7 @@ function App() {
 
         <button
           type="button"
-          onClick={() => setFile(undefined)}
+          onClick={importer.cancel}
           className="theme-control rounded-lg px-2 text-xl font-black tracking-[-0.04em] text-ink sm:text-2xl"
         >
           Inpaint<span className="text-primary">—web</span>
@@ -142,17 +127,19 @@ function App() {
 
       <main className="relative h-[calc(100svh-4rem)] min-h-0">
         {file ? (
-          <Suspense
-            fallback={
-              <div className="flex h-full items-center justify-center text-sm font-bold text-muted">
-                {stateLanguageTag === 'zh'
-                  ? '正在加载编辑器…'
-                  : 'Loading editor…'}
-              </div>
-            }
-          >
-            <Editor file={file} />
-          </Suspense>
+          <EditorBoundary onReset={importer.cancel}>
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-sm font-bold text-muted">
+                  {stateLanguageTag === 'zh'
+                    ? '正在加载编辑器…'
+                    : 'Loading editor…'}
+                </div>
+              }
+            >
+              <Editor file={file} />
+            </Suspense>
+          </EditorBoundary>
         ) : (
           <section className="workspace-enter mx-auto flex h-full w-full max-w-6xl flex-col justify-center overflow-y-auto px-4 py-6 sm:px-8 sm:py-10">
             <div className="mx-auto mb-6 max-w-2xl text-center sm:mb-8">
@@ -169,15 +156,30 @@ function App() {
 
             <div className="mx-auto h-[clamp(15rem,34svh,21rem)] w-full max-w-3xl">
               <FileSelect
-                onSelection={async f => {
-                  const { file: resizedFile } = await resizeImageFile(
-                    f,
-                    1024 * 4
-                  )
-                  setFile(resizedFile)
+                busy={imageImport.status === 'loading'}
+                onSelection={f => {
+                  void importer.load(f)
                 }}
               />
             </div>
+
+            {imageImport.status === 'loading' && (
+              <div className="mx-auto mt-3 flex items-center gap-3 text-sm text-muted">
+                <p role="status">{message('image_import_loading')}</p>
+                <Button onClick={importer.cancel}>{message('cancel')}</Button>
+              </div>
+            )}
+            {imageImport.status === 'error' && (
+              <div
+                role="alert"
+                className="mx-auto mt-3 max-w-3xl text-center text-sm text-muted"
+              >
+                <p className="font-semibold text-ink">
+                  {message('image_import_failed')}
+                </p>
+                <p className="mt-1 break-words">{imageImport.error}</p>
+              </div>
+            )}
 
             <div className="mx-auto mt-7 w-full max-w-5xl sm:mt-9">
               <p className="mb-3 text-center text-xs font-bold uppercase tracking-[0.18em] text-muted">
@@ -189,17 +191,15 @@ function App() {
                     type="button"
                     key={image}
                     onClick={() => {
-                      void startWithDemoImage(image).catch(error => {
-                        alert(
-                          error instanceof Error ? error.message : String(error)
-                        )
-                      })
+                      void importer.load(
+                        `${import.meta.env.BASE_URL}examples/${image}.jpeg`
+                      )
                     }}
                     className="sample-button theme-control h-20 w-24 flex-none snap-center overflow-hidden rounded-2xl border border-line bg-panel shadow-sm sm:h-24 sm:w-28"
                   >
                     <img
                       className="h-full w-full object-cover"
-                      src={`examples/${image}.jpeg`}
+                      src={`${import.meta.env.BASE_URL}examples/${image}.jpeg`}
                       alt={image}
                     />
                   </button>
@@ -211,8 +211,11 @@ function App() {
       </main>
 
       {showAbout && (
-        <Modal ariaLabel={message('feedback')}>
-          <div ref={modalRef} className="space-y-4">
+        <Modal
+          ariaLabel={message('feedback')}
+          onClose={() => setShowAbout(false)}
+        >
+          <div className="space-y-4">
             <p className="text-xs font-black uppercase tracking-[0.2em] text-primary">
               Inpaint—web
             </p>
@@ -233,40 +236,6 @@ function App() {
               </a>
             </p>
             <RepairRuntime onRepaired={() => setShowAbout(false)} />
-          </div>
-        </Modal>
-      )}
-      {!(downloadProgress === 100) && (
-        <Modal ariaLabel={message('inpaint_model_download_message')}>
-          <div className="space-y-5">
-            <p className="text-lg font-bold leading-7">
-              {message('inpaint_model_download_message')}
-            </p>
-            <Progress percent={downloadProgress} />
-          </div>
-        </Modal>
-      )}
-      {modelDownloadError && (
-        <Modal
-          ariaLabel={
-            stateLanguageTag === 'zh' ? '模型下载失败' : 'Model download failed'
-          }
-        >
-          <div className="space-y-5">
-            <h2 className="text-xl font-black">
-              {stateLanguageTag === 'zh'
-                ? '模型下载失败'
-                : 'Model download failed'}
-            </h2>
-            <p className="break-words text-sm leading-6 text-muted">
-              {modelDownloadError}
-            </p>
-            <Button primary onClick={preloadInpaintModel}>
-              {stateLanguageTag === 'zh' ? '重试' : 'Retry'}
-            </Button>
-            <RepairRuntime
-              onRepaired={() => setModelDownloadError(undefined)}
-            />
           </div>
         </Modal>
       )}

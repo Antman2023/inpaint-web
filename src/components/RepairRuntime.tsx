@@ -13,7 +13,7 @@ export default function RepairRuntime({
   const [status, setStatus] = useState<'idle' | 'working' | 'done' | 'error'>(
     'idle'
   )
-  const [progress, setProgress] = useState(0)
+  const [progress, setProgress] = useState<number | null>(0)
   const [error, setError] = useState('')
   const busy = useRef(false)
 
@@ -45,7 +45,10 @@ export default function RepairRuntime({
         {message('repair_runtime')}
       </Button>
       {status !== 'idle' && (
-        <Modal ariaLabel={message('repair_runtime')}>
+        <Modal
+          ariaLabel={message('repair_runtime')}
+          onClose={status === 'working' ? undefined : () => setStatus('idle')}
+        >
           <div className="space-y-5" aria-busy={status === 'working'}>
             <h2 className="text-xl font-black">{message('repair_runtime')}</h2>
             <p role="status" className="text-sm leading-6 text-muted">
@@ -57,7 +60,9 @@ export default function RepairRuntime({
                     : 'repair_failed'
               )}
             </p>
-            {status === 'working' && <Progress percent={progress} />}
+            {status === 'working' && (
+              <Progress percent={progress} label={message('repair_runtime')} />
+            )}
             {status === 'error' && (
               <p role="alert" className="break-words text-sm text-muted">
                 {error}

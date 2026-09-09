@@ -1,28 +1,4 @@
-import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
-
-export function useClickAway<T extends HTMLElement>(
-  ref: RefObject<T>,
-  callback: () => void
-) {
-  const callbackRef = useRef(callback)
-  callbackRef.current = callback
-
-  useEffect(() => {
-    const handlePointerDown = (event: MouseEvent | TouchEvent) => {
-      const element = ref.current
-      if (element && !element.contains(event.target as Node)) {
-        callbackRef.current()
-      }
-    }
-
-    document.addEventListener('mousedown', handlePointerDown)
-    document.addEventListener('touchstart', handlePointerDown)
-    return () => {
-      document.removeEventListener('mousedown', handlePointerDown)
-      document.removeEventListener('touchstart', handlePointerDown)
-    }
-  }, [ref])
-}
+import { useCallback, useEffect, useState } from 'react'
 
 export function useWindowSize() {
   const [size, setSize] = useState(() => ({
@@ -63,82 +39,141 @@ export function dataURItoBlob(dataURI: string) {
 //   return new Blob([ia], { type: mime })
 // }
 
+export function imageFileName(name: string, mime: string, edited = false) {
+  const extension = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/webp': 'webp',
+  }[mime]
+  if (!extension) return name
+  const dot = name.lastIndexOf('.')
+  const hasExtension = dot > 0
+  const currentExtension = hasExtension ? name.slice(dot + 1).toLowerCase() : ''
+  if (
+    !edited &&
+    (currentExtension === extension ||
+      (mime === 'image/jpeg' && currentExtension === 'jpeg'))
+  ) {
+    return name
+  }
+  const base = (hasExtension ? name.slice(0, dot) : name) || 'image'
+  return `${base}${edited ? '-edited' : ''}.${extension}`
+}
+
 export function downloadImage(uri: string, name: string) {
   const link = document.createElement('a')
   link.href = uri
   link.download = name
 
-  // this is necessary as link.click() does not work on the latest firefox
-  link.dispatchEvent(
-    new MouseEvent('click', {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-    })
-  )
-
-  setTimeout(() => {
-    // For Firefox it is necessary to delay revoking the ObjectURL
-    // window.URL.revokeObjectURL(base64)
+  link.hidden = true
+  document.body.appendChild(link)
+  try {
+    link.click()
+  } finally {
     link.remove()
-  }, 100)
+  }
 }
 
-export function loadImage(image: HTMLImageElement, src: string) {
-  return new Promise((resolve, reject) => {
-    const initSRC = image.src
-    const img = image
-    img.onload = resolve
-    img.onerror = err => {
-      img.src = initSRC
-      reject(err)
+function abortReason(signal?: AbortSignal) {
+  return (
+    signal?.reason ?? new DOMException('Image loading cancelled', 'AbortError')
+  )
+}
+
+export function loadImage(
+  image: HTMLImageElement,
+  src: string,
+  signal?: AbortSignal
+) {
+  if (signal?.aborted) return Promise.reject(abortReason(signal))
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      image.onload = null
+      image.onerror = null
+      signal?.removeEventListener('abort', onAbort)
     }
-    img.src = src
+    const onAbort = () => {
+      cleanup()
+      image.removeAttribute('src')
+      reject(abortReason(signal))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    image.onload = () => {
+      cleanup()
+      resolve()
+    }
+    image.onerror = () => {
+      cleanup()
+      reject(new Error('Unable to decode image'))
+    }
+    try {
+      image.src = src
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
   })
 }
 
 export function useImage(
-  file: Blob | MediaSource
-): [HTMLImageElement, boolean, (width: number, height: number) => void] {
-  const [image, setImage] = useState(new Image())
-  const [isLoaded, setIsLoaded] = useState(false)
-
-  // 调整图像分辨率的函数
-  const adjustResolution = useCallback(
-    (width, height) => {
-      const canvas = document.createElement('canvas')
-      const context = canvas.getContext('2d')
-      if (!context) {
-        throw new Error('Unable to get canvas context')
-      }
-      canvas.width = width
-      canvas.height = height
-      context.drawImage(image, 0, 0, width, height)
-      const resizedImage = new Image()
-      resizedImage.src = canvas.toDataURL()
-      setImage(resizedImage)
-    },
-    [image]
-  )
+  file: Blob
+): [HTMLImageElement, boolean, Error | undefined, () => void] {
+  const [attempt, setAttempt] = useState(0)
+  const [state, setState] = useState<{
+    file: Blob
+    attempt: number
+    image: HTMLImageElement
+    loaded: boolean
+    error?: Error
+  }>(() => ({ file, attempt, image: new Image(), loaded: false }))
+  const retry = useCallback(() => setAttempt(value => value + 1), [])
 
   useEffect(() => {
-    const newImage = new Image()
+    const image = new Image()
     const objectUrl = URL.createObjectURL(file)
-    setIsLoaded(false)
-    newImage.onload = () => {
-      setIsLoaded(true)
-    }
-    newImage.src = objectUrl
-    setImage(newImage)
+    const controller = new AbortController()
+    let active = true
+    const timeout = setTimeout(
+      () => controller.abort(new Error('Image loading timed out')),
+      30_000
+    )
+    setState({ file, attempt, image, loaded: false })
+    void loadImage(image, objectUrl, controller.signal)
+      .then(() => {
+        if (!image.naturalWidth || !image.naturalHeight) {
+          throw new Error('Image has invalid dimensions')
+        }
+        if (active) setState({ file, attempt, image, loaded: true })
+      })
+      .catch(error => {
+        if (active) {
+          setState({
+            file,
+            attempt,
+            image,
+            loaded: false,
+            error: error instanceof Error ? error : new Error(String(error)),
+          })
+        }
+      })
+      .finally(() => clearTimeout(timeout))
 
     return () => {
-      newImage.onload = null
-      newImage.onerror = null
+      active = false
+      clearTimeout(timeout)
+      controller.abort()
+      image.removeAttribute('src')
       URL.revokeObjectURL(objectUrl)
     }
-  }, [file])
+  }, [file, attempt])
 
-  return [image, isLoaded, adjustResolution]
+  const current = state.file === file && state.attempt === attempt
+  return [
+    state.image,
+    current && state.loaded,
+    current ? state.error : undefined,
+    retry,
+  ]
 }
 
 // https://stackoverflow.com/questions/23945494/use-html5-to-resize-an-image-before-upload
@@ -150,8 +185,10 @@ interface ResizeImageFileResult {
 }
 export async function resizeImageFile(
   file: File,
-  maxSize: number
+  maxSize: number,
+  signal?: AbortSignal
 ): Promise<ResizeImageFileResult> {
+  if (signal?.aborted) throw abortReason(signal)
   if (!Number.isFinite(maxSize) || maxSize < 1) {
     throw new Error('Invalid maximum image size')
   }
@@ -160,12 +197,10 @@ export async function resizeImageFile(
   }
   const image = new Image()
   const objectUrl = URL.createObjectURL(file)
+  let canvas: HTMLCanvasElement | undefined
   try {
-    await new Promise<void>((resolve, reject) => {
-      image.onload = () => resolve()
-      image.onerror = () => reject(new Error('Unable to decode image'))
-      image.src = objectUrl
-    })
+    await loadImage(image, objectUrl, signal)
+    if (signal?.aborted) throw abortReason(signal)
     const { naturalWidth: width, naturalHeight: height } = image
     if (!width || !height) throw new Error('Image has invalid dimensions')
     const scale = Math.min(1, maxSize / Math.max(width, height))
@@ -173,7 +208,7 @@ export async function resizeImageFile(
       return { file, resized: false }
     }
 
-    const canvas = document.createElement('canvas')
+    canvas = document.createElement('canvas')
     canvas.width = Math.max(1, Math.round(width * scale))
     canvas.height = Math.max(1, Math.round(height * scale))
     const ctx = canvas.getContext('2d')
@@ -185,13 +220,32 @@ export async function resizeImageFile(
       file.type === 'image/png' || file.type === 'image/webp'
         ? file.type
         : 'image/jpeg'
+    const resizeCanvas = canvas
     const blob = await new Promise<Blob>((resolve, reject) => {
-      canvas.toBlob(result => {
-        if (result) resolve(result)
-        else reject(new Error('Unable to encode image'))
-      }, outputType)
+      const cleanup = () => signal?.removeEventListener('abort', onAbort)
+      const onAbort = () => {
+        cleanup()
+        reject(abortReason(signal))
+      }
+      if (signal?.aborted) {
+        onAbort()
+        return
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      try {
+        resizeCanvas.toBlob(result => {
+          cleanup()
+          if (signal?.aborted) reject(abortReason(signal))
+          else if (result) resolve(result)
+          else reject(new Error('Unable to encode image'))
+        }, outputType)
+      } catch (error) {
+        cleanup()
+        reject(error)
+      }
     })
-    const f = new File([blob], file.name, {
+    if (signal?.aborted) throw abortReason(signal)
+    const f = new File([blob], imageFileName(file.name, blob.type), {
       type: blob.type,
     })
     return {
@@ -203,6 +257,11 @@ export async function resizeImageFile(
   } finally {
     image.onload = null
     image.onerror = null
+    image.removeAttribute('src')
     URL.revokeObjectURL(objectUrl)
+    if (canvas) {
+      canvas.width = 0
+      canvas.height = 0
+    }
   }
 }

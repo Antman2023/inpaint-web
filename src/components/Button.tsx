@@ -7,6 +7,8 @@ interface ButtonProps {
   primary?: boolean
   style?: CSSProperties
   ariaLabel?: string
+  ariaDescribedBy?: string
+  ariaPressed?: boolean
   disabled?: boolean
   onClick?: () => void
   onEnter?: () => void
@@ -24,6 +26,8 @@ export default function Button(props: ButtonProps) {
     onEnter,
     onLeave,
     ariaLabel,
+    ariaDescribedBy,
+    ariaPressed,
     disabled,
   } = props
   const [active, setActive] = useState(false)
@@ -40,6 +44,8 @@ export default function Button(props: ButtonProps) {
     <button
       type="button"
       aria-label={ariaLabel}
+      aria-describedby={ariaDescribedBy}
+      aria-pressed={ariaPressed}
       disabled={disabled}
       onClick={onClick}
       onPointerDown={() => {

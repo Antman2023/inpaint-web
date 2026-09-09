@@ -1,21 +1,19 @@
+import { loadImage as decodeImage } from '../utils'
 /* eslint-disable camelcase */
 /* eslint-disable no-plusplus */
-import type { Mat } from 'opencv-ts'
-import cv, { ensureOpenCV } from './opencv'
+import { ensureOpenCV } from './opencv'
+import { readRGB, readResizedMask } from './preprocess'
 import type { Tensor } from 'onnxruntime-web'
 import { getSession, withRuntime, type SessionStage } from './runtime'
 // ort.env.debug = true
 // ort.env.logLevel = 'verbose'
 // ort.env.webgpu.profilingMode = 'default'
 
-function loadImage(url: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.crossOrigin = 'Anonymous'
-    img.onload = () => resolve(img)
-    img.onerror = () => reject(new Error(`Failed to load image from ${url}`))
-    img.src = url
-  })
+async function loadImage(url: string): Promise<HTMLImageElement> {
+  const image = new Image()
+  image.crossOrigin = 'Anonymous'
+  await decodeImage(image, url)
+  return image
 }
 
 async function loadFileImage(file: File) {
@@ -25,104 +23,6 @@ async function loadFileImage(file: File) {
   } finally {
     URL.revokeObjectURL(objectUrl)
   }
-}
-function imgProcess(img: Mat) {
-  const channels = new cv.MatVector()
-  cv.split(img, channels) // 分割通道
-
-  const C = channels.size() // 通道数
-  const H = img.rows // 图像高度
-  const W = img.cols // 图像宽度
-
-  const chwArray = new Uint8Array(C * H * W) // 创建新的数组来存储转换后的数据
-
-  for (let c = 0; c < C; c++) {
-    const channelData = channels.get(c).data // 获取单个通道的数据
-    for (let h = 0; h < H; h++) {
-      for (let w = 0; w < W; w++) {
-        chwArray[c * H * W + h * W + w] = channelData[h * W + w]
-        // chwArray[c * H * W + h * W + w] = channelData[h * W + w]
-      }
-    }
-  }
-
-  channels.delete() // 清理内存
-  return chwArray // 返回转换后的数据
-}
-function markProcess(img: Mat) {
-  const channels = new cv.MatVector()
-  cv.split(img, channels) // 分割通道
-
-  const C = 1 // 通道数
-  const H = img.rows // 图像高度
-  const W = img.cols // 图像宽度
-
-  const chwArray = new Uint8Array(C * H * W) // 创建新的数组来存储转换后的数据
-
-  for (let c = 0; c < C; c++) {
-    const channelData = channels.get(0).data // 获取单个通道的数据
-    for (let h = 0; h < H; h++) {
-      for (let w = 0; w < W; w++) {
-        chwArray[c * H * W + h * W + w] =
-          channelData[h * W + w] === 255 ? 0 : 255
-      }
-    }
-  }
-
-  channels.delete() // 清理内存
-  return chwArray // 返回转换后的数据
-}
-function processImage(
-  img: HTMLImageElement,
-  canvasId?: string
-): Promise<Uint8Array> {
-  return new Promise((resolve, reject) => {
-    let src: Mat | undefined
-    let srcRgb: Mat | undefined
-    try {
-      src = cv.imread(img)
-      srcRgb = new cv.Mat()
-      // 将图像从RGBA转换为RGB
-      cv.cvtColor(src, srcRgb, cv.COLOR_RGBA2RGB)
-      if (canvasId) {
-        cv.imshow(canvasId, srcRgb)
-      }
-      resolve(imgProcess(srcRgb))
-    } catch (error) {
-      reject(error)
-    } finally {
-      src?.delete()
-      srcRgb?.delete()
-    }
-  })
-}
-
-function processMark(
-  img: HTMLImageElement,
-  canvasId?: string
-): Promise<Uint8Array> {
-  return new Promise((resolve, reject) => {
-    let src: Mat | undefined
-    let srcGrey: Mat | undefined
-    try {
-      src = cv.imread(img)
-      srcGrey = new cv.Mat()
-
-      // 将图像从RGBA转换为二值化
-      cv.cvtColor(src, srcGrey, cv.COLOR_BGR2GRAY)
-
-      if (canvasId) {
-        cv.imshow(canvasId, srcGrey)
-      }
-
-      resolve(markProcess(srcGrey))
-    } catch (error) {
-      reject(error)
-    } finally {
-      src?.delete()
-      srcGrey?.delete()
-    }
-  })
 }
 function postProcess(uint8Data: Uint8Array, width: number, height: number) {
   const chwToHwcData = new Uint8ClampedArray(width * height * 4)
@@ -148,46 +48,17 @@ function imageDataToDataURL(imageData: ImageData) {
   canvas.width = imageData.width
   canvas.height = imageData.height
 
-  // 绘制 imageData 到 canvas
-  const ctx = canvas.getContext('2d')
-  if (!ctx) {
-    throw new Error('Unable to get canvas context')
-  }
-  ctx.putImageData(imageData, 0, 0)
-
-  // 导出为数据 URL
-  return canvas.toDataURL()
-}
-
-const resizeMark = (
-  image: HTMLImageElement,
-  width: number,
-  height: number
-): Promise<HTMLImageElement> => {
-  return new Promise((resolve, reject) => {
-    const canvas = document.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
-
-    // 将图片绘制到canvas上，并调整大小
+  try {
     const ctx = canvas.getContext('2d')
-    if (!ctx) {
-      reject(new Error('Unable to get canvas context'))
-      return
-    }
-    ctx.drawImage(image, 0, 0, width, height)
-
-    // 获取调整大小后的图片URL
-    const resizedImageUrl = canvas.toDataURL()
-
-    // 创建一个新的Image对象并设置其src为调整大小后的图片URL
-    const resizedImage = new Image()
-    resizedImage.onload = () => resolve(resizedImage)
-    resizedImage.onerror = () =>
-      reject(new Error('Failed to load resized image'))
-    resizedImage.src = resizedImageUrl
-  })
+    if (!ctx) throw new Error('Unable to get canvas context')
+    ctx.putImageData(imageData, 0, 0)
+    return canvas.toDataURL()
+  } finally {
+    canvas.width = 0
+    canvas.height = 0
+  }
 }
+
 export type InpaintStage =
   | SessionStage
   | 'processing_opencv'
@@ -221,24 +92,26 @@ async function inpaint(
   ])
 
   const [img, mark] = await Promise.all([
-    processImage(originalImg),
-    processMark(
-      await resizeMark(originalMark, originalImg.width, originalImg.height)
+    readRGB(originalImg),
+    readResizedMask(
+      originalMark,
+      originalImg.naturalWidth,
+      originalImg.naturalHeight
     ),
   ])
 
   const imageTensor = new ort.Tensor('uint8', img, [
     1,
     3,
-    originalImg.height,
-    originalImg.width,
+    originalImg.naturalHeight,
+    originalImg.naturalWidth,
   ])
 
   const maskTensor = new ort.Tensor('uint8', mark, [
     1,
     1,
-    originalImg.height,
-    originalImg.width,
+    originalImg.naturalHeight,
+    originalImg.naturalWidth,
   ])
 
   const feed: Record<string, Tensor> = {
@@ -256,28 +129,40 @@ async function inpaint(
   console.time('postProcess')
   onStage?.('processing_output')
   const outsTensor = results[session.outputNames[0]]
-  if (!(outsTensor.data instanceof Uint8Array)) {
+  if (!(outsTensor?.data instanceof Uint8Array)) {
     throw new TypeError('Expected a uint8 output tensor')
+  }
+  if (
+    outsTensor.dims.join(',') !==
+      `1,3,${originalImg.naturalHeight},${originalImg.naturalWidth}` ||
+    outsTensor.data.length !==
+      originalImg.naturalWidth * originalImg.naturalHeight * 3
+  ) {
+    throw new Error('Unexpected inpainting output shape or data length')
   }
   const chwToHwcData = postProcess(
     outsTensor.data,
-    originalImg.width,
-    originalImg.height
+    originalImg.naturalWidth,
+    originalImg.naturalHeight
   )
   const imageData = new ImageData(
     chwToHwcData,
-    originalImg.width,
-    originalImg.height
+    originalImg.naturalWidth,
+    originalImg.naturalHeight
   )
-  console.log(imageData, 'imageData')
   const result = imageDataToDataURL(imageData)
   console.timeEnd('postProcess')
 
   return result
 }
 
-export default function run(...args: Parameters<typeof inpaint>) {
+export default function run(
+  imageFile: File | HTMLImageElement,
+  maskBase64: string,
+  onStage?: (stage: InpaintStage) => void,
+  signal?: AbortSignal
+) {
   return withRuntime(async () => {
-    return inpaint(...args)
-  })
+    return inpaint(imageFile, maskBase64, onStage)
+  }, signal)
 }

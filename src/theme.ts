@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type Theme = 'light' | 'dark'
 
@@ -39,6 +39,7 @@ function applyTheme(theme: Theme) {
 
 export function useTheme() {
   const [theme, setTheme] = useState<Theme>(initialTheme)
+  const manuallySelected = useRef(false)
 
   useEffect(() => {
     applyTheme(theme)
@@ -47,8 +48,9 @@ export function useTheme() {
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     const handleSystemThemeChange = () => {
+      if (manuallySelected.current) return
       try {
-        if (window.localStorage.getItem(STORAGE_KEY)) {
+        if (isTheme(window.localStorage.getItem(STORAGE_KEY))) {
           return
         }
       } catch {
@@ -62,6 +64,7 @@ export function useTheme() {
   }, [])
 
   const toggleTheme = useCallback(() => {
+    manuallySelected.current = true
     setTheme(currentTheme => {
       const nextTheme = currentTheme === 'dark' ? 'light' : 'dark'
       try {
