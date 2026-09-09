@@ -1,8 +1,20 @@
 /* eslint-disable no-console */
 /* eslint-disable no-plusplus */
-import cv, { type Mat } from 'opencv-ts'
+import type { Mat } from 'opencv-ts'
+import cv, { ensureOpenCV } from './opencv'
 import type { InferenceSession, Tensor } from 'onnxruntime-web'
-import { getSession, withRuntime } from './runtime'
+import { getSession, withRuntime, type SessionStage } from './runtime'
+
+export type UpscaleStage =
+  | SessionStage
+  | 'processing_opencv'
+  | 'processing_prepare'
+  | 'processing_output'
+export interface UpscaleStatus {
+  stage?: UpscaleStage
+  tile?: number
+  total?: number
+}
 
 function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -45,10 +57,11 @@ function imgProcess(img: Mat) {
   channels.delete() // 清理内存
   return chwArray // 返回转换后的数据
 }
-async function tileProc(
+export async function tileProc(
   inputTensor: Tensor,
   session: InferenceSession,
-  callback: (progress: number) => void
+  callback: (progress: number) => void,
+  onStatus?: (status: UpscaleStatus) => void
 ) {
   const inputDims = inputTensor.dims
   const imageW = inputDims[3]
@@ -80,6 +93,9 @@ async function tileProc(
 
   for (let i = 0; i < tilesx; i++) {
     for (let j = 0; j < tilesy; j++) {
+      onStatus?.({ tile: currentTile + 1, total: numTiles })
+      // WASM inference can occupy the main thread. Paint status before each tile.
+      await new Promise(resolve => setTimeout(resolve, 16))
       const ti = Date.now()
       const tileW = Math.min(tileSizePre, imageW - i * tileSizePre)
       const tileH = Math.min(tileSizePre, imageH - j * tileSizePre)
@@ -120,11 +136,11 @@ async function tileProc(
         tileSize,
         tileSize,
       ])
-      const r = await session.run({ 'input.1': tile })
+      const r = await session.run({ [session.inputNames[0]]: tile })
       const results = {
-        output: r['1895'],
+        output: r[session.outputNames[0]],
       }
-      if (!(results.output.data instanceof Float32Array)) {
+      if (!(results.output?.data instanceof Float32Array)) {
         throw new TypeError('Expected a float32 output tensor')
       }
       console.log(`pre dims:${results.output.dims}`)
@@ -132,6 +148,13 @@ async function tileProc(
       const outTileW = tileW * 4
       const outTileH = tileH * 4
       const outTileSize = tileSize * 4
+      if (
+        results.output.dims.join(',') !== `1,3,${outTileSize},${outTileSize}`
+      ) {
+        throw new Error(
+          `Unexpected 4x model output shape: ${results.output.dims.join(' × ')}`
+        )
+      }
       const outTileSizePre = tileSizePre * 4
 
       const outTileROffset = 0
@@ -209,7 +232,8 @@ function imageDataToDataURL(imageData: ImageData) {
 }
 async function superResolution(
   imageFile: File | HTMLImageElement,
-  callback: (progress: number) => void
+  callback: (progress: number) => void,
+  onStatus?: (status: UpscaleStatus) => void
 ) {
   const img =
     imageFile instanceof HTMLImageElement
@@ -223,9 +247,13 @@ async function superResolution(
   }
 
   console.time('sessionCreate')
-  const session = await getSession('superResolution')
+  const [session] = await Promise.all([
+    getSession('superResolution', stage => onStatus?.({ stage })),
+    ensureOpenCV(),
+  ])
   console.timeEnd('sessionCreate')
 
+  onStatus?.({ stage: 'processing_prepare' })
   const imageTersorData = await processImage(img)
   const imageTensor = new ort.Tensor('float32', imageTersorData, [
     1,
@@ -234,7 +262,8 @@ async function superResolution(
     img.width,
   ])
 
-  const imageData = await tileProc(imageTensor, session, callback)
+  const imageData = await tileProc(imageTensor, session, callback, onStatus)
+  onStatus?.({ stage: 'processing_output' })
   console.time('postProcess')
   console.log(imageData, 'imageData')
   const url = imageDataToDataURL(imageData)
@@ -244,5 +273,7 @@ async function superResolution(
 }
 
 export default function run(...args: Parameters<typeof superResolution>) {
-  return withRuntime(() => superResolution(...args))
+  return withRuntime(async () => {
+    return superResolution(...args)
+  })
 }

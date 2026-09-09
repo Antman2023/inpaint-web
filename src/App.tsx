@@ -232,7 +232,7 @@ function App() {
                 GitHub
               </a>
             </p>
-            <RepairRuntime />
+            <RepairRuntime onRepaired={() => setShowAbout(false)} />
           </div>
         </Modal>
       )}

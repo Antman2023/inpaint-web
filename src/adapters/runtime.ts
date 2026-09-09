@@ -9,6 +9,15 @@ import {
 import { getCapabilities, loadingOnnxruntime, runtimeBase, wasm } from './util'
 
 const sessions = new Map<modelType, Promise<InferenceSession>>()
+export type SessionStage =
+  'processing_runtime' | 'processing_model' | 'processing_initializing'
+const stages = new Map<modelType, SessionStage>()
+const listeners = new Map<modelType, Set<(stage: SessionStage) => void>>()
+
+function reportStage(type: modelType, stage: SessionStage) {
+  stages.set(type, stage)
+  for (const listener of listeners.get(type) ?? []) listener(stage)
+}
 let compatible = false
 let active = 0
 let repairing: Promise<void> | undefined
@@ -26,17 +35,26 @@ export async function withRuntime<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
-export function getSession(type: modelType) {
+export function getSession(
+  type: modelType,
+  onStage?: (stage: SessionStage) => void
+) {
   let session = sessions.get(type)
   if (!session) {
     session = (async () => {
+      reportStage(type, 'processing_runtime')
       await loadingOnnxruntime(compatible)
-      const capabilities = await getCapabilities(compatible)
+      reportStage(type, 'processing_model')
+      const [capabilities, model] = await Promise.all([
+        getCapabilities(compatible),
+        ensureModel(type),
+      ])
       ort.env.wasm.wasmPaths = runtimeBase
       ort.env.wasm.numThreads = 1
       ort.env.wasm.proxy = false
       ort.env.wasm.simd = capabilities.simd
-      return ort.InferenceSession.create(await ensureModel(type), {
+      reportStage(type, 'processing_initializing')
+      return ort.InferenceSession.create(model, {
         executionProviders: [
           !compatible && capabilities.webgpu ? 'webgpu' : 'wasm',
         ],
@@ -47,7 +65,21 @@ export function getSession(type: modelType) {
     })
     sessions.set(type, session)
   }
-  return session
+  if (!onStage) return session
+  const subscribers = listeners.get(type) ?? new Set()
+  listeners.set(type, subscribers)
+  subscribers.add(onStage)
+  onStage(stages.get(type) ?? 'processing_runtime')
+  return session.finally(() => subscribers.delete(onStage))
+}
+
+export function warmupInpaint() {
+  return withRuntime(async () => {
+    await Promise.all([
+      getSession('inpaint'),
+      import('./opencv').then(module => module.ensureOpenCV()),
+    ])
+  })
 }
 
 export function repairRuntime(
@@ -66,6 +98,8 @@ export function repairRuntime(
         '浏览器不支持 WebAssembly，请更新浏览器后重试。 / WebAssembly is unavailable; update your browser.'
       )
     onProgress(0)
+    const { ensureOpenCV } = await import('./opencv')
+    await ensureOpenCV()
     const types: modelType[] = ['inpaint']
     if (
       sessions.has('superResolution') ||

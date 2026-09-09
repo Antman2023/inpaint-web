@@ -21,7 +21,7 @@
   "back_here": "Back here",
   "processing": "Processing, please wait",
   "processing_description": "Processing is running in this browser and may take a moment.",
-  "processing_model": "Loading and initializing the model…",
+  "processing_model": "Reading or downloading model…",
   "processing_prepare": "Preparing the image and painted area…",
   "processing_inference": "Repairing the image. Large images may take longer…",
   "processing_output": "Generating the result image…",
@@ -32,5 +32,10 @@
   "repair_done": "Repair complete. Compatibility mode is enabled; you can continue editing.",
   "repair_failed": "Repair failed. Check your connection and retry. If it still fails, update your browser or try another browser.",
   "repair_retry": "Retry",
-  "repair_close": "Close"
+  "repair_close": "Close",
+  "processing_runtime": "Preparing runtime…",
+  "processing_initializing": "Initializing inference engine; first use may take longer…",
+  "processing_opencv": "Initializing image processing…",
+  "upscale_tile": "Upscaling tile",
+  "upscale_wait": "First initialization and each tile may take time. Progress updates after each tile completes."
 }

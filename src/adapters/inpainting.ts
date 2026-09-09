@@ -1,8 +1,9 @@
 /* eslint-disable camelcase */
 /* eslint-disable no-plusplus */
-import cv, { type Mat } from 'opencv-ts'
+import type { Mat } from 'opencv-ts'
+import cv, { ensureOpenCV } from './opencv'
 import type { Tensor } from 'onnxruntime-web'
-import { getSession, withRuntime } from './runtime'
+import { getSession, withRuntime, type SessionStage } from './runtime'
 // ort.env.debug = true
 // ort.env.logLevel = 'verbose'
 // ort.env.webgpu.profilingMode = 'default'
@@ -188,7 +189,8 @@ const resizeMark = (
   })
 }
 export type InpaintStage =
-  | 'processing_model'
+  | SessionStage
+  | 'processing_opencv'
   | 'processing_prepare'
   | 'processing_inference'
   | 'processing_output'
@@ -200,7 +202,13 @@ async function inpaint(
 ) {
   onStage?.('processing_model')
   console.time('sessionCreate')
-  const session = await getSession('inpaint')
+  const [session] = await Promise.all([
+    getSession('inpaint', onStage).then(session => {
+      onStage?.('processing_opencv')
+      return session
+    }),
+    ensureOpenCV(),
+  ])
   console.timeEnd('sessionCreate')
   console.time('preProcess')
   onStage?.('processing_prepare')
@@ -269,5 +277,7 @@ async function inpaint(
 }
 
 export default function run(...args: Parameters<typeof inpaint>) {
-  return withRuntime(() => inpaint(...args))
+  return withRuntime(async () => {
+    return inpaint(...args)
+  })
 }

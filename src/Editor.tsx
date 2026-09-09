@@ -10,6 +10,8 @@ import { modelExists, downloadModel } from './adapters/cache'
 import Modal from './components/Modal'
 import { message } from './i18n'
 import type { InpaintStage } from './adapters/inpainting'
+import { warmupInpaint } from './adapters/runtime'
+import type { UpscaleStatus } from './adapters/superResolution'
 
 interface EditorProps {
   file: File
@@ -58,6 +60,12 @@ function drawLines(
 const BRUSH_HIDE_ON_SLIDER_CHANGE_TIMEOUT = 2000
 export default function Editor(props: EditorProps) {
   const { file } = props
+  useEffect(() => {
+    // Prepare while the user positions the image and paints the mask.
+    void warmupInpaint().catch(error =>
+      console.warn('Model warmup failed', error)
+    )
+  }, [])
   const [brushSize, setBrushSize] = useState(40)
   const [original, isOriginalLoaded] = useImage(file)
   const [renders, setRenders] = useState<HTMLImageElement[]>([])
@@ -72,6 +80,8 @@ export default function Editor(props: EditorProps) {
   const [showOriginal, setShowOriginal] = useState(false)
   const [isInpaintingLoading, setIsProcessingLoading] = useState(false)
   const [generateProgress, setGenerateProgress] = useState(0)
+  const [upscaleStatus, setUpscaleStatus] = useState<UpscaleStatus>()
+  const upscaleBusy = useRef(false)
   const modalRef = useRef(null)
   const separatorRef = useRef<HTMLDivElement>(null)
   const [useSeparator, setUseSeparator] = useState(false)
@@ -496,6 +506,12 @@ export default function Editor(props: EditorProps) {
   }
 
   const onSuperResolution = useCallback(async () => {
+    if (upscaleBusy.current) return
+    upscaleBusy.current = true
+    setInpaintStage(null)
+    setUpscaleStatus({ stage: 'processing_model' })
+    setGenerateProgress(0)
+    setIsProcessingLoading(true)
     try {
       if (!(await modelExists('superResolution'))) {
         if (!mountedRef.current) return
@@ -515,9 +531,15 @@ export default function Editor(props: EditorProps) {
       const newFile = renders.at(-1) ?? file
       const { default: superResolution } =
         await import('./adapters/superResolution')
-      const res = await superResolution(newFile, progress => {
-        if (mountedRef.current) setGenerateProgress(progress)
-      })
+      const res = await superResolution(
+        newFile,
+        progress => {
+          if (mountedRef.current) setGenerateProgress(progress)
+        },
+        status => {
+          if (mountedRef.current) setUpscaleStatus(status)
+        }
+      )
       if (!res) {
         throw new Error('empty response')
       }
@@ -539,7 +561,9 @@ export default function Editor(props: EditorProps) {
         alert(error instanceof Error ? error.message : String(error))
       }
     } finally {
+      upscaleBusy.current = false
       if (mountedRef.current) {
+        setUpscaleStatus(undefined)
         setDownloaded(true)
         setIsProcessingLoading(false)
       }
@@ -667,7 +691,19 @@ export default function Editor(props: EditorProps) {
                     {message(inpaintStage)}
                   </p>
                 ) : (
-                  <Progress percent={generateProgress} />
+                  <>
+                    <p role="status" className="text-sm text-muted">
+                      {upscaleStatus?.stage
+                        ? message(upscaleStatus.stage)
+                        : `${message('upscale_tile')} ${upscaleStatus?.tile ?? 1} / ${upscaleStatus?.total ?? 1}`}
+                    </p>
+                    {!upscaleStatus?.stage && (
+                      <Progress percent={generateProgress} />
+                    )}
+                    <p className="text-xs text-muted">
+                      {message('upscale_wait')}
+                    </p>
+                  </>
                 )}
               </div>
             </div>

@@ -194,6 +194,7 @@ function runtimeHarness({ cachedUpscale = false, failDownload = false } = {}) {
   const runtime = loadModule(
     'src/adapters/runtime.ts',
     {
+      './opencv': { ensureOpenCV: async () => {} },
       './cache': {
         modelExists: async () => cachedUpscale,
         ensureModel: async type => type,
@@ -334,4 +335,215 @@ test('runtime loader falls back to another CDN and repair replaces the failed ru
   assert.notEqual(context.ort, oldRuntime)
   assert.equal(context.ort.generation, 3)
   assert.match(urls[2], /ort.wasm.min.js$/)
+})
+
+test('OpenCV callers wait for delayed WASM initialization without assimilating its thenable', async () => {
+  let checked = 0
+  let deleted = 0
+  let assimilated = false
+  const cv = {
+    then: () => {
+      assimilated = true
+    },
+  }
+  const { ensureOpenCV } = loadModule('src/adapters/opencv.ts', {
+    'opencv-ts': cv,
+  })
+  const first = ensureOpenCV()
+  assert.equal(ensureOpenCV(), first)
+  setTimeout(() => {
+    cv.Mat = class {
+      constructor() {
+        checked++
+      }
+      delete() {
+        deleted++
+      }
+    }
+    cv.MatVector = class {}
+  }, 5)
+  assert.equal(checked, 0)
+  assert.equal(await first, undefined)
+  assert.equal(checked, 1)
+  assert.equal(deleted, 1)
+  assert.equal(assimilated, false)
+})
+
+test('OpenCV initialization times out and can retry once the module becomes ready', async () => {
+  const cv = {}
+  let time = 0
+  const { ensureOpenCV } = loadModule(
+    'src/adapters/opencv.ts',
+    { 'opencv-ts': cv },
+    {
+      Date: { now: () => time },
+      setTimeout: callback => {
+        time += 30_000
+        queueMicrotask(callback)
+      },
+    }
+  )
+  await assert.rejects(ensureOpenCV(), /OpenCV initialization timed out/)
+  cv.Mat = class {
+    delete() {}
+  }
+  cv.MatVector = class {}
+  await ensureOpenCV()
+})
+
+test('OpenCV readiness propagates allocation failures and permits retry', async () => {
+  const cv = {
+    Mat: class {
+      constructor() {
+        throw new Error('WASM aborted')
+      }
+    },
+    MatVector: class {},
+  }
+  const { ensureOpenCV } = loadModule('src/adapters/opencv.ts', {
+    'opencv-ts': cv,
+  })
+  await assert.rejects(ensureOpenCV(), /WASM aborted/)
+  cv.Mat = class {
+    delete() {}
+  }
+  await ensureOpenCV()
+})
+
+test('installed OpenCV initializes and allocates a real WASM matrix', async () => {
+  const { ensureOpenCV, default: cv } = loadModule('src/adapters/opencv.ts')
+  await ensureOpenCV()
+  const mat = new cv.Mat(2, 3, cv.CV_8UC1)
+  try {
+    assert.equal(mat.rows, 2)
+    assert.equal(mat.cols, 3)
+    assert.equal(mat.data.length, 6)
+  } finally {
+    mat.delete()
+  }
+})
+
+test('editor warmup and first inference share a single session initialization', async () => {
+  const { runtime, events } = runtimeHarness()
+  const warmup = runtime.warmupInpaint()
+  const stages = []
+  const session = runtime.getSession('inpaint', stage => stages.push(stage))
+  await Promise.all([warmup, session])
+  assert.deepEqual(events, [['create', 'inpaint', 'webgpu']])
+  assert.deepEqual(stages, [
+    'processing_runtime',
+    'processing_model',
+    'processing_initializing',
+  ])
+  await runtime.warmupInpaint()
+  assert.equal(events.length, 1)
+})
+
+test('repair cannot reset the runtime while editor warmup is initializing', async () => {
+  const { runtime } = runtimeHarness()
+  const warmup = runtime.warmupInpaint()
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
+  await warmup
+  await runtime.repairRuntime(() => {})
+})
+
+function upscaleHarness() {
+  class Tensor {
+    constructor(type, data, dims) {
+      Object.assign(this, { type, data, dims })
+    }
+  }
+  const adapter = loadModule(
+    'src/adapters/superResolution.ts',
+    {
+      './opencv': { default: {}, ensureOpenCV: async () => {} },
+      './runtime': {},
+    },
+    {
+      ort: { Tensor },
+      ImageData: class {
+        constructor(data, width, height) {
+          Object.assign(this, { data, width, height })
+        }
+      },
+      console: { log() {} },
+      setTimeout: callback => queueMicrotask(callback),
+    }
+  )
+  return { adapter, Tensor }
+}
+
+test('4x tiles use model I/O names and stitch edges with correct RGB and dimensions', async () => {
+  const { adapter, Tensor } = upscaleHarness()
+  const width = 53,
+    height = 55,
+    plane = width * height
+  const input = new Float32Array(plane * 3)
+  for (let i = 0; i < input.length; i++) input[i] = (i % 251) / 255
+  const statuses = [],
+    progress = []
+  let runs = 0
+  const session = {
+    inputNames: ['rgb'],
+    outputNames: ['upscaled'],
+    run: async feeds => {
+      assert.equal(statuses.at(-1).tile, ++runs)
+      const tile = feeds.rgb
+      assert.ok(tile)
+      const data = new Float32Array(3 * 256 * 256)
+      for (let c = 0; c < 3; c++)
+        for (let y = 0; y < 256; y++)
+          for (let x = 0; x < 256; x++) {
+            data[c * 256 * 256 + y * 256 + x] =
+              tile.data[
+                c * 64 * 64 + Math.floor(y / 4) * 64 + Math.floor(x / 4)
+              ]
+          }
+      return { upscaled: new Tensor('float32', data, [1, 3, 256, 256]) }
+    },
+  }
+  const result = await adapter.tileProc(
+    new Tensor('float32', input, [1, 3, height, width]),
+    session,
+    p => progress.push(p),
+    status => statuses.push(status)
+  )
+  assert.equal(result.width, width * 4)
+  assert.equal(result.height, height * 4)
+  assert.equal(runs, 4)
+  for (let y = 0; y < result.height; y++)
+    for (let x = 0; x < result.width; x++) {
+      const source = Math.floor(y / 4) * width + Math.floor(x / 4)
+      const dest = (y * result.width + x) * 4
+      for (let c = 0; c < 3; c++)
+        assert.equal(
+          result.data[dest + c],
+          Math.round(input[c * plane + source] * 255)
+        )
+      assert.equal(result.data[dest + 3], 255)
+    }
+  assert.deepEqual(progress, [25, 50, 75, 100])
+})
+
+test('4x upscaling rejects incompatible output before reporting completion', async () => {
+  const { adapter, Tensor } = upscaleHarness()
+  const progress = []
+  await assert.rejects(
+    adapter.tileProc(
+      new Tensor('float32', new Float32Array(3), [1, 3, 1, 1]),
+      {
+        inputNames: ['rgb'],
+        outputNames: ['result'],
+        run: async () => ({
+          result: new Tensor('float32', new Float32Array(3), [1, 3, 1, 1]),
+        }),
+      },
+      p => progress.push(p)
+    ),
+    /Unexpected 4x model output shape/
+  )
+  assert.deepEqual(progress, [])
 })
