@@ -48,11 +48,11 @@ function getModel(modelType: modelType) {
   throw new Error('wrong modelType')
 }
 
-export async function loadModel(modelType: modelType): Promise<ArrayBuffer> {
-  const model = (await localforage.getItem(
-    getModel(modelType).name
-  )) as ArrayBuffer
-  return model
+export async function loadModel(
+  modelType: modelType
+): Promise<ArrayBuffer | null> {
+  const model = await localforage.getItem<ArrayBuffer>(getModel(modelType).name)
+  return model instanceof ArrayBuffer && model.byteLength > 0 ? model : null
 }
 
 export async function modelExists(modelType: modelType) {
@@ -61,9 +61,8 @@ export async function modelExists(modelType: modelType) {
 }
 
 export async function ensureModel(modelType: modelType) {
-  if (await modelExists(modelType)) {
-    return loadModel(modelType)
-  }
+  const cached = await loadModel(modelType)
+  if (cached) return cached
   await downloadModel(modelType, () => {})
   const model = await loadModel(modelType)
   if (!(model instanceof ArrayBuffer) || model.byteLength === 0) {
@@ -72,7 +71,44 @@ export async function ensureModel(modelType: modelType) {
   return model
 }
 
+type ProgressListener = (progress: number) => void
+const pendingDownloads = new Map<
+  modelType,
+  {
+    promise: Promise<void>
+    listeners: Set<ProgressListener>
+    progress: number
+  }
+>()
+
 export async function downloadModel(
+  modelType: modelType,
+  setDownloadProgress: ProgressListener
+) {
+  let pending = pendingDownloads.get(modelType)
+  if (!pending) {
+    const task = {
+      promise: Promise.resolve(),
+      listeners: new Set<ProgressListener>(),
+      progress: 0,
+    }
+    pendingDownloads.set(modelType, task)
+    task.promise = downloadAndCacheModel(modelType, progress => {
+      task.progress = progress
+      for (const listener of task.listeners) listener(progress)
+    }).finally(() => pendingDownloads.delete(modelType))
+    pending = task
+  }
+  pending.listeners.add(setDownloadProgress)
+  try {
+    setDownloadProgress(pending.progress)
+    await pending.promise
+  } finally {
+    pending.listeners.delete(setDownloadProgress)
+  }
+}
+
+async function downloadAndCacheModel(
   modelType: modelType,
   setDownloadProgress: (arg0: number) => void
 ) {
@@ -82,47 +118,59 @@ export async function downloadModel(
   }
 
   async function downloadFromUrl(url: string) {
-    console.log('start download from', url)
     setDownloadProgress(0)
-    const response = await fetch(url)
-    if (!response.ok) {
-      throw new Error(`Model download failed with status ${response.status}`)
-    }
-    if (!response.body) {
-      throw new Error('Model download response has no body')
-    }
-    const fullSize = Number(response.headers.get('content-length'))
-    const reader = response.body.getReader()
-    const total: Uint8Array[] = []
-    let downloaded = 0
+    const controller = new AbortController()
+    // Reset on each chunk so slow but active downloads can finish.
+    let timeout = setTimeout(() => controller.abort(), 30_000)
+    try {
+      const response = await fetch(url, { signal: controller.signal })
+      if (!response.ok) {
+        throw new Error(`Model download failed with status ${response.status}`)
+      }
+      if (!response.body) {
+        throw new Error('Model download response has no body')
+      }
+      const fullSize = Number(response.headers.get('content-length'))
+      const reader = response.body.getReader()
+      const total: Uint8Array[] = []
+      let downloaded = 0
 
-    while (true) {
-      const { done, value } = await reader.read()
+      while (true) {
+        const { done, value } = await reader.read()
+        clearTimeout(timeout)
+        timeout = setTimeout(() => controller.abort(), 30_000)
 
-      if (done) {
-        break
+        if (done) {
+          break
+        }
+
+        downloaded += value?.length || 0
+
+        if (value) {
+          total.push(value)
+        }
+
+        if (Number.isFinite(fullSize) && fullSize > 0) {
+          setDownloadProgress(Math.min(99, (downloaded / fullSize) * 100))
+        }
       }
 
-      downloaded += value?.length || 0
-
-      if (value) {
-        total.push(value)
+      clearTimeout(timeout)
+      reader.releaseLock()
+      if (downloaded === 0) throw new Error('Downloaded model is empty')
+      const buffer = new Uint8Array(downloaded)
+      let offset = 0
+      for (const chunk of total) {
+        buffer.set(chunk, offset)
+        offset += chunk.length
       }
 
-      if (Number.isFinite(fullSize) && fullSize > 0) {
-        setDownloadProgress(Math.min(99, (downloaded / fullSize) * 100))
-      }
+      await saveModel(modelType, buffer.buffer)
+      setDownloadProgress(100)
+    } finally {
+      clearTimeout(timeout)
+      controller.abort()
     }
-
-    const buffer = new Uint8Array(downloaded)
-    let offset = 0
-    for (const chunk of total) {
-      buffer.set(chunk, offset)
-      offset += chunk.length
-    }
-
-    await saveModel(modelType, buffer.buffer)
-    setDownloadProgress(100)
   }
 
   const model = getModel(modelType)

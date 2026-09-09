@@ -148,71 +148,61 @@ interface ResizeImageFileResult {
   originalWidth?: number
   originalHeight?: number
 }
-export function resizeImageFile(
+export async function resizeImageFile(
   file: File,
   maxSize: number
 ): Promise<ResizeImageFileResult> {
-  const reader = new FileReader()
+  if (!Number.isFinite(maxSize) || maxSize < 1) {
+    throw new Error('Invalid maximum image size')
+  }
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Not an image')
+  }
   const image = new Image()
-  const canvas = document.createElement('canvas')
-
-  const resize = (): ResizeImageFileResult => {
-    let { width, height } = image
-
-    if (width > height) {
-      if (width > maxSize) {
-        height *= maxSize / width
-        width = maxSize
-      }
-    } else if (height > maxSize) {
-      width *= maxSize / height
-      height = maxSize
-    }
-
-    if (width === image.width && height === image.height) {
+  const objectUrl = URL.createObjectURL(file)
+  try {
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve()
+      image.onerror = () => reject(new Error('Unable to decode image'))
+      image.src = objectUrl
+    })
+    const { naturalWidth: width, naturalHeight: height } = image
+    if (!width || !height) throw new Error('Image has invalid dimensions')
+    const scale = Math.min(1, maxSize / Math.max(width, height))
+    if (scale === 1) {
       return { file, resized: false }
     }
 
-    canvas.width = width
-    canvas.height = height
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(width * scale))
+    canvas.height = Math.max(1, Math.round(height * scale))
     const ctx = canvas.getContext('2d')
     if (!ctx) {
       throw new Error('could not get context')
     }
-    ctx.drawImage(image, 0, 0, width, height)
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
     const outputType =
       file.type === 'image/png' || file.type === 'image/webp'
         ? file.type
         : 'image/jpeg'
-    const dataUrl = canvas.toDataURL(outputType)
-    const blob = dataURItoBlob(dataUrl)
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(result => {
+        if (result) resolve(result)
+        else reject(new Error('Unable to encode image'))
+      }, outputType)
+    })
     const f = new File([blob], file.name, {
-      type: outputType,
+      type: blob.type,
     })
     return {
       file: f,
       resized: true,
-      originalWidth: image.width,
-      originalHeight: image.height,
+      originalWidth: width,
+      originalHeight: height,
     }
+  } finally {
+    image.onload = null
+    image.onerror = null
+    URL.revokeObjectURL(objectUrl)
   }
-
-  return new Promise((resolve, reject) => {
-    if (!file.type.match(/image.*/)) {
-      reject(new Error('Not an image'))
-      return
-    }
-    reader.onload = () => {
-      if (typeof reader.result !== 'string') {
-        reject(new Error('Unable to read image data'))
-        return
-      }
-      image.onload = () => resolve(resize())
-      image.onerror = () => reject(new Error('Unable to decode image'))
-      image.src = reader.result
-    }
-    reader.onerror = () =>
-      reject(reader.error ?? new Error('Unable to read image'))
-    reader.readAsDataURL(file)
-  })
 }

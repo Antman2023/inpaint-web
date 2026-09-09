@@ -17,6 +17,7 @@
     "start": "vite --host",
     "build": "tsc && vite build",
     "typecheck": "tsc",
+    "test": "node --test tests/*.test.cjs",
     "lint": "biome lint src vite.config.ts",
     "serve": "vite preview",
     "prepare": "husky",

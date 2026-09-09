@@ -1,5 +1,5 @@
 import { PhotographIcon } from '@heroicons/react/outline'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { message } from '../i18n'
 
 type FileSelectProps = {
@@ -9,15 +9,19 @@ type FileSelectProps = {
 export default function FileSelect(props: FileSelectProps) {
   const { onSelection } = props
 
+  const selectingRef = useRef(false)
+  const [isSelecting, setIsSelecting] = useState(false)
   const [dragHover, setDragHover] = useState(false)
   const [uploadElemId] = useState(`file-upload-${Math.random().toString()}`)
 
   async function onFileSelected(file?: File) {
-    if (!file) {
+    if (!file || selectingRef.current) {
       return
     }
+    selectingRef.current = true
+    setIsSelecting(true)
     try {
-      if (!file.type.match('image.*')) {
+      if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
         throw new Error(message('invalid_file'))
       }
       if (file.size > 10 * 1024 * 1024) {
@@ -26,88 +30,28 @@ export default function FileSelect(props: FileSelectProps) {
       await onSelection(file)
     } catch (error) {
       alert(error instanceof Error ? error.message : String(error))
+    } finally {
+      selectingRef.current = false
+      setIsSelecting(false)
     }
-  }
-
-  async function getFile(entry: FileSystemFileEntry): Promise<File> {
-    return new Promise((resolve, reject) => {
-      entry.file((file: File) => resolve(file), reject)
-    })
-  }
-
-  /* eslint-disable no-await-in-loop */
-
-  // Drop handler function to get all files
-  async function getAllFileEntries(items: DataTransferItemList) {
-    const fileEntries: Array<File> = []
-    // Use BFS to traverse entire directory/file structure
-    const queue: FileSystemEntry[] = []
-    // Unfortunately items is not iterable i.e. no forEach
-    for (let i = 0; i < items.length; i += 1) {
-      const entry = items[i].webkitGetAsEntry()
-      if (entry) {
-        queue.push(entry)
-      }
-    }
-    while (queue.length > 0) {
-      const entry = queue.shift()
-      if (entry?.isFile) {
-        // Only append images
-        const file = await getFile(entry as FileSystemFileEntry)
-        fileEntries.push(file)
-      } else if (entry?.isDirectory) {
-        queue.push(
-          ...(await readAllDirectoryEntries(
-            (entry as FileSystemDirectoryEntry).createReader()
-          ))
-        )
-      }
-    }
-    return fileEntries
-  }
-
-  // Get all the entries (files or sub-directories) in a directory
-  // by calling readEntries until it returns empty array
-  async function readAllDirectoryEntries(
-    directoryReader: FileSystemDirectoryReader
-  ) {
-    const entries: FileSystemEntry[] = []
-    let readEntries = await readEntriesPromise(directoryReader)
-    while (readEntries.length > 0) {
-      entries.push(...readEntries)
-      readEntries = await readEntriesPromise(directoryReader)
-    }
-    return entries
-  }
-
-  /* eslint-enable no-await-in-loop */
-
-  // Wrap readEntries in a promise to make working with readEntries easier
-  // readEntries will return only some of the entries in a directory
-  // e.g. Chrome returns at most 100 entries at a time
-  async function readEntriesPromise(
-    directoryReader: FileSystemDirectoryReader
-  ): Promise<FileSystemEntry[]> {
-    return new Promise((resolve, reject) => {
-      directoryReader.readEntries(resolve, reject)
-    })
   }
 
   async function handleDrop(ev: React.DragEvent) {
     ev.preventDefault()
-    try {
-      const items = await getAllFileEntries(ev.dataTransfer.items)
-      await onFileSelected(items[0] ?? ev.dataTransfer.files[0])
-    } catch (error) {
-      alert(error instanceof Error ? error.message : String(error))
-    } finally {
-      setDragHover(false)
-    }
+    setDragHover(false)
+    // Snapshot files before awaiting; this editor accepts one image at a time.
+    const files = Array.from(ev.dataTransfer.files)
+    const file =
+      files.find(file =>
+        ['image/png', 'image/jpeg', 'image/webp'].includes(file.type)
+      ) ?? files[0]
+    await onFileSelected(file)
   }
 
   return (
     <label
       htmlFor={uploadElemId}
+      aria-busy={isSelecting}
       className="group relative block h-full w-full cursor-pointer font-medium focus-within:outline-none"
     >
       <div
@@ -130,9 +74,11 @@ export default function FileSelect(props: FileSelectProps) {
           id={uploadElemId}
           name={uploadElemId}
           type="file"
+          disabled={isSelecting}
           className="sr-only"
           onChange={ev => {
             const file = ev.currentTarget.files?.[0]
+            ev.currentTarget.value = ''
             if (file) {
               void onFileSelected(file)
             }
