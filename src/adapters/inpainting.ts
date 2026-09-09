@@ -205,10 +205,18 @@ const resizeMark = (
   })
 }
 let model: InferenceSession | null = null
+export type InpaintStage =
+  | 'processing_model'
+  | 'processing_prepare'
+  | 'processing_inference'
+  | 'processing_output'
+
 export default async function inpaint(
   imageFile: File | HTMLImageElement,
-  maskBase64: string
+  maskBase64: string,
+  onStage?: (stage: InpaintStage) => void
 ) {
+  onStage?.('processing_model')
   console.time('sessionCreate')
   let session = model
   if (!session) {
@@ -222,6 +230,7 @@ export default async function inpaint(
   }
   console.timeEnd('sessionCreate')
   console.time('preProcess')
+  onStage?.('processing_prepare')
 
   const [originalImg, originalMark] = await Promise.all([
     imageFile instanceof HTMLImageElement
@@ -259,10 +268,12 @@ export default async function inpaint(
   console.timeEnd('preProcess')
 
   console.time('run')
+  onStage?.('processing_inference')
   const results = await session.run(feed)
   console.timeEnd('run')
 
   console.time('postProcess')
+  onStage?.('processing_output')
   const outsTensor = results[session.outputNames[0]]
   if (!(outsTensor.data instanceof Uint8Array)) {
     throw new TypeError('Expected a uint8 output tensor')

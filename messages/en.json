@@ -21,6 +21,10 @@
   "back_here": "Back here",
   "processing": "Processing, please wait",
   "processing_description": "Processing is running in this browser and may take a moment.",
+  "processing_model": "Loading and initializing the model…",
+  "processing_prepare": "Preparing the image and painted area…",
+  "processing_inference": "Repairing the image. Large images may take longer…",
+  "processing_output": "Generating the result image…",
   "inpaint_model_download_message": "Need to download a 30MB model file, please wait patiently...",
   "upscaleing_model_download_message": "Need to download a 70MB model file, please wait patiently..."
 }

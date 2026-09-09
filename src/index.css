@@ -12,7 +12,6 @@
   --color-primary: var(--accent);
   --color-primary-strong: var(--accent-strong);
   --color-primary-ink: var(--accent-ink);
-  --animate-pulse-fast: pulse 0.7s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
 :root {

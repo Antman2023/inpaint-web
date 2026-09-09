@@ -9,6 +9,7 @@ import Progress from './components/Progress'
 import { modelExists, downloadModel } from './adapters/cache'
 import Modal from './components/Modal'
 import { message } from './i18n'
+import type { InpaintStage } from './adapters/inpainting'
 
 interface EditorProps {
   file: File
@@ -81,32 +82,17 @@ export default function Editor(props: EditorProps) {
   const canvasDiv = useRef<HTMLDivElement>(null)
   const [downloaded, setDownloaded] = useState(true)
   const [downloadProgress, setDownloadProgress] = useState(0)
-  const progressTimerRef = useRef<number>()
+  const [inpaintStage, setInpaintStage] = useState<InpaintStage | null>(null)
   const mountedRef = useRef(true)
   const windowSize = useWindowSize()
 
   const onloading = useCallback(() => {
     setIsProcessingLoading(true)
-    setGenerateProgress(0)
-    window.clearInterval(progressTimerRef.current)
-    const progressTimer = window.setInterval(() => {
-      setGenerateProgress(p => {
-        if (p < 90) return Math.min(90, p + 10 * Math.random())
-        if (p < 99) return Math.min(99, p + Math.random())
-        // Do not hide the progress bar after 99%,cause sometimes long time progress
-        // window.setTimeout(() => setIsInpaintingLoading(false), 500)
-        return p
-      })
-    }, 1000)
-    progressTimerRef.current = progressTimer
+    setInpaintStage('processing_model')
     return {
       close: () => {
-        window.clearInterval(progressTimer)
-        if (progressTimerRef.current === progressTimer) {
-          progressTimerRef.current = undefined
-        }
         if (mountedRef.current) {
-          setGenerateProgress(100)
+          setInpaintStage(null)
           setIsProcessingLoading(false)
         }
       },
@@ -116,7 +102,6 @@ export default function Editor(props: EditorProps) {
   useEffect(
     () => () => {
       mountedRef.current = false
-      window.clearInterval(progressTimerRef.current)
       window.clearTimeout(hideBrushTimeoutRef.current)
     },
     []
@@ -255,7 +240,9 @@ export default function Editor(props: EditorProps) {
         // each time based on the last result, the first is the original
         const newFile = renders.slice(-1)[0] ?? file
         const { default: inpaint } = await import('./adapters/inpainting')
-        const res = await inpaint(newFile, maskCanvas.toDataURL())
+        const res = await inpaint(newFile, maskCanvas.toDataURL(), stage => {
+          if (mountedRef.current) setInpaintStage(stage)
+        })
         if (!res) {
           throw new Error('empty response')
         }
@@ -563,7 +550,7 @@ export default function Editor(props: EditorProps) {
     <div
       className={[
         'editor-shell theme-surface flex h-full min-h-0 flex-col items-center overflow-hidden bg-canvas px-3 sm:px-6',
-        isInpaintingLoading ? 'animate-pulse-fast pointer-events-none' : '',
+        isInpaintingLoading ? 'pointer-events-none' : '',
       ].join(' ')}
     >
       {/* History */}
@@ -675,7 +662,13 @@ export default function Editor(props: EditorProps) {
                 <p className="text-sm text-muted">
                   {message('processing_description')}
                 </p>
-                <Progress percent={generateProgress} />
+                {inpaintStage ? (
+                  <p role="status" className="text-sm text-muted">
+                    {message(inpaintStage)}
+                  </p>
+                ) : (
+                  <Progress percent={generateProgress} />
+                )}
               </div>
             </div>
           )}

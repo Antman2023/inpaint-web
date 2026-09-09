@@ -21,6 +21,10 @@
   "back_here": "回到这里",
   "processing": "正在处理中，请耐心等待",
   "processing_description": "处理在本地浏览器中进行，可能需要一些时间。",
+  "processing_model": "正在加载并初始化模型…",
+  "processing_prepare": "正在准备图片和涂抹区域…",
+  "processing_inference": "正在修复图片，大图可能需要较长时间…",
+  "processing_output": "正在生成结果图片…",
   "inpaint_model_download_message": "注意需要连接国际互联网，需要下载一次30MB大小模型文件,耐心等待。。。",
   "upscaleing_model_download_message": "注意需要连接国际互联网，需要下载一次70MB大小模型文件,耐心等待。。。"
 }
