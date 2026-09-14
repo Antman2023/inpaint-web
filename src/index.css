@@ -16,6 +16,7 @@
   --color-primary: var(--accent);
   --color-primary-strong: var(--accent-strong);
   --color-primary-ink: var(--accent-ink);
+  --color-primary-detail: var(--accent-detail);
 }
 
 :root {
@@ -30,6 +31,7 @@
   --accent: #bdff01;
   --accent-strong: #a8e600;
   --accent-ink: #11150a;
+  --accent-detail: #486300;
 }
 
 :root[data-theme='dark'] {
@@ -44,6 +46,7 @@
   --accent: #bdff01;
   --accent-strong: #d0ff48;
   --accent-ink: #101408;
+  --accent-detail: #bdff01;
 }
 
 html,
@@ -109,12 +112,12 @@ input {
 
 .sample-button:focus-visible,
 .theme-control:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-detail);
   outline-offset: 3px;
 }
 
 .theme-slider {
-  accent-color: var(--accent);
+  accent-color: var(--accent-detail);
 }
 
 .theme-slider::-webkit-slider-thumb {
@@ -122,7 +125,7 @@ input {
 }
 
 .history-scrollbar {
-  scrollbar-color: var(--accent) var(--panel-strong);
+  scrollbar-color: var(--accent-detail) var(--panel-strong);
   scrollbar-width: thin;
 }
 
@@ -135,7 +138,7 @@ input {
 }
 
 .history-scrollbar::-webkit-scrollbar-thumb {
-  background: var(--accent);
+  background: var(--accent-detail);
   border-radius: 999px;
 }
 

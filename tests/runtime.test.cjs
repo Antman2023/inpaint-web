@@ -555,6 +555,81 @@ test('throwing progress observers cannot reject or restart a shared download', a
   assert.equal((await cache.loadModel('inpaint')).byteLength, 1)
 })
 
+test('partial models and proxy error documents are discarded before fallback', async () => {
+  for (const init of [
+    { status: 206 },
+    { headers: { 'content-range': 'bytes 0-2/100' } },
+    { headers: { 'content-type': 'text/html; charset=utf-8' } },
+    { headers: { 'content-type': 'APPLICATION/JSON' } },
+    { headers: { 'content-type': 'application/problem+json' } },
+    { headers: { 'content-type': 'application/xhtml+xml' } },
+    { headers: { 'content-type': 'text/xml' } },
+    { status: 503 },
+  ]) {
+    let requests = 0
+    let cancelled = false
+    const rejectedBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array([9, 9, 9]))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const { cache, stored } = cacheHarness(async () => {
+      if (++requests === 1) return new Response(rejectedBody, init)
+      assert.equal(cancelled, true)
+      assert.equal(rejectedBody.locked, false)
+      assert.equal(stored.size, 0)
+      return new Response(new Uint8Array([1, 2, 3]))
+    })
+    await cache.downloadModel('inpaint', () => {})
+    assert.equal(requests, 2)
+    assert.deepEqual(
+      new Uint8Array(await cache.loadModel('inpaint')),
+      new Uint8Array([1, 2, 3])
+    )
+  }
+})
+
+test('error documents from both model hosts leave the cache empty and allow retry', async () => {
+  let fail = true
+  const progress = []
+  const { cache, stored } = cacheHarness(async () =>
+    fail
+      ? new Response('<html>Proxy error</html>', {
+          headers: { 'content-type': 'text/html' },
+        })
+      : new Response(new Uint8Array([4]))
+  )
+  await assert.rejects(
+    cache.downloadModel('inpaint', value => progress.push(value)),
+    /text\/html instead of a model/
+  )
+  assert.equal(stored.size, 0)
+  assert.equal(progress.includes(100), false)
+  fail = false
+  await cache.downloadModel('inpaint', value => progress.push(value))
+  assert.equal(stored.size, 1)
+  assert.equal(progress.at(-1), 100)
+})
+
+test('binary models accept missing or generic MIME types and compressed transfers', async () => {
+  for (const headers of [
+    {},
+    { 'content-type': 'application/octet-stream' },
+    { 'content-type': 'application/onnx' },
+    { 'content-type': 'text/plain' },
+    { 'content-encoding': 'gzip', 'content-length': '20' },
+  ]) {
+    const { cache } = cacheHarness(
+      async () => new Response(new Uint8Array([1, 2, 3]), { headers })
+    )
+    await cache.downloadModel('inpaint', () => {})
+    assert.equal((await cache.loadModel('inpaint')).byteLength, 3)
+  }
+})
+
 test('cache write failure does not redownload and the next attempt can recover', async () => {
   let requests = 0,
     fail = true

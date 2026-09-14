@@ -585,7 +585,9 @@ export default function Editor(props: EditorProps) {
           <div
             key={render.id}
             className={
-              index === history.index ? 'rounded-sm ring-2 ring-primary' : ''
+              index === history.index
+                ? 'rounded-sm ring-2 ring-primary-detail'
+                : ''
             }
             style={{
               position: 'relative',

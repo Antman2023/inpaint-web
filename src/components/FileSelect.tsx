@@ -33,14 +33,14 @@ export default function FileSelect(props: FileSelectProps) {
     <label
       htmlFor={uploadElemId}
       aria-busy={busy}
-      className="group relative block h-full w-full cursor-pointer rounded-3xl font-medium focus-within:outline-2 focus-within:outline-offset-4 focus-within:outline-primary"
+      className="group relative block h-full w-full cursor-pointer rounded-3xl font-medium focus-within:outline-2 focus-within:outline-offset-4 focus-within:outline-primary-detail"
     >
       <div
         className={[
           'upload-zone theme-surface flex h-full w-full items-center justify-center rounded-3xl border border-dashed px-6 py-8 text-center',
-          'border-line bg-panel hover:border-primary hover:bg-hover',
+          'border-line bg-panel hover:border-primary-detail hover:bg-hover',
           dragHover
-            ? 'motion-safe:scale-[1.01] border-primary bg-hover shadow-[0_0_0_4px_rgba(189,255,1,0.12)]'
+            ? 'motion-safe:scale-[1.01] border-primary-detail bg-hover shadow-[0_0_0_4px_rgba(189,255,1,0.12)]'
             : '',
         ].join(' ')}
         onDrop={handleDrop}

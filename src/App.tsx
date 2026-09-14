@@ -75,7 +75,7 @@ function App() {
           onClick={importer.cancel}
           className="theme-control min-w-0 justify-self-center whitespace-nowrap rounded-lg px-1 text-lg font-black tracking-[-0.04em] text-ink sm:px-2 sm:text-2xl"
         >
-          Inpaint<span className="text-primary">—web</span>
+          Inpaint<span className="text-primary-detail">—web</span>
         </button>
 
         <div className="flex min-w-0 items-center justify-end gap-1">
@@ -141,9 +141,9 @@ function App() {
             </Suspense>
           </EditorBoundary>
         ) : (
-          <section className="workspace-enter mx-auto flex h-full w-full max-w-6xl flex-col justify-center overflow-y-auto px-4 py-6 sm:px-8 sm:py-10">
-            <div className="mx-auto mb-6 max-w-2xl text-center sm:mb-8">
-              <p className="text-xs font-black uppercase tracking-[0.22em] text-primary sm:text-sm">
+          <section className="workspace-enter mx-auto flex h-full w-full max-w-6xl flex-col overflow-y-auto px-4 py-6 [&>*]:shrink-0 sm:px-8 sm:py-10">
+            <div className="mx-auto mt-auto mb-6 max-w-2xl text-center sm:mb-8">
+              <p className="text-xs font-black uppercase tracking-[0.22em] text-primary-detail sm:text-sm">
                 {message('workspace_eyebrow')}
               </p>
               <h1 className="mt-3 text-2xl font-black tracking-[-0.035em] text-ink sm:text-4xl">
@@ -181,11 +181,11 @@ function App() {
               </div>
             )}
 
-            <div className="mx-auto mt-7 w-full max-w-5xl sm:mt-9">
+            <div className="mx-auto mt-7 mb-auto w-full max-w-5xl sm:mt-9">
               <p className="mb-3 text-center text-xs font-bold uppercase tracking-[0.18em] text-muted">
                 {message('try_it_images')}
               </p>
-              <div className="history-scrollbar -mt-2 flex snap-x gap-3 overflow-x-auto px-[calc(50%_-_2.75rem)] pt-2 pb-3 sm:justify-center sm:px-0">
+              <div className="history-scrollbar -mt-2 flex snap-x gap-3 overflow-x-auto px-1 pt-2 pb-3">
                 {EXAMPLE_IMAGES.map(image => (
                   <button
                     type="button"
@@ -195,7 +195,7 @@ function App() {
                         `${import.meta.env.BASE_URL}examples/${image}.jpeg`
                       )
                     }}
-                    className="sample-button theme-control h-20 w-24 flex-none snap-center overflow-hidden rounded-2xl border border-line bg-panel shadow-sm sm:h-24 sm:w-28"
+                    className="sample-button theme-control h-20 w-24 flex-none snap-center overflow-hidden rounded-2xl border border-line bg-panel shadow-sm first:ml-auto last:mr-auto sm:h-24 sm:w-28"
                   >
                     <img
                       className="h-full w-full object-cover"
@@ -216,7 +216,7 @@ function App() {
           onClose={() => setShowAbout(false)}
         >
           <div className="space-y-4">
-            <p className="text-xs font-black uppercase tracking-[0.2em] text-primary">
+            <p className="text-xs font-black uppercase tracking-[0.2em] text-primary-detail">
               Inpaint—web
             </p>
             <h2 className="text-2xl font-black tracking-tight">

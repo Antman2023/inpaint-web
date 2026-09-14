@@ -146,17 +146,39 @@ async function downloadAndCacheModel(
     // Reset on each chunk so slow but active downloads can finish.
     let timeout = setTimeout(() => controller.abort(), 30_000)
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+    let complete = false
     try {
       const response = await fetch(url, { signal: controller.signal })
+      reader = response.body?.getReader()
       if (!response.ok) {
         throw new Error(`Model download failed with status ${response.status}`)
       }
-      if (!response.body) {
+      // No Range was requested: a partial response cannot initialize a model.
+      if (response.status === 206 || response.headers.has('content-range')) {
+        throw new Error('Model download returned a partial response')
+      }
+      const contentType = response.headers
+        .get('content-type')
+        ?.split(';')[0]
+        .trim()
+        .toLowerCase()
+      if (
+        contentType === 'text/html' ||
+        contentType === 'application/json' ||
+        contentType === 'text/xml' ||
+        contentType === 'application/xml' ||
+        contentType?.endsWith('+json') ||
+        contentType?.endsWith('+xml')
+      ) {
+        throw new Error(
+          `Model download returned ${contentType} instead of a model`
+        )
+      }
+      if (!reader) {
         throw new Error('Model download response has no body')
       }
       const fullSize = Number(response.headers.get('content-length'))
       if (Number.isFinite(fullSize) && fullSize > 0) setDownloadProgress(0)
-      reader = response.body.getReader()
       const total: Uint8Array[] = []
       let downloaded = 0
 
@@ -166,6 +188,7 @@ async function downloadAndCacheModel(
         timeout = setTimeout(() => controller.abort(), 30_000)
 
         if (done) {
+          complete = true
           break
         }
 
@@ -193,6 +216,9 @@ async function downloadAndCacheModel(
     } finally {
       clearTimeout(timeout)
       controller.abort()
+      // Release rejected response bodies as well as interrupted model streams.
+      // Do not wait for a remote cancellation acknowledgement before fallback.
+      if (!complete) void reader?.cancel().catch(() => {})
       reader?.releaseLock()
     }
   }
