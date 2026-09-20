@@ -85,7 +85,7 @@ jobs:
       - name: Start production server
         run: |
           docker run --detach --name inpaint-smoke --publish 127.0.0.1:8080:80 inpaint-web:smoke
-          curl --retry 20 --retry-connrefused --retry-delay 1 --max-time 5 --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/
+          curl --retry 20 --retry-all-errors --retry-delay 1 --max-time 5 --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/
       - name: Verify production responses
         run: node tests/deployment-smoke.cjs http://127.0.0.1:8080
       - name: Show server logs on failure
