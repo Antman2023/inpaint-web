@@ -1,3 +1,5 @@
+// @refresh reset
+// Hot updates need fresh controllers and history URLs after cleanup releases them.
 /* eslint-disable jsx-a11y/click-events-have-key-events */
 /* eslint-disable jsx-a11y/no-static-element-interactions */
 import { DownloadIcon, EyeIcon, ReplyIcon } from '@heroicons/react/outline'
@@ -20,11 +22,10 @@ import {
 } from './imageResources'
 import Progress from './components/Progress'
 import { waitForAbort } from './cancellation'
-import { modelExists, downloadModel } from './adapters/cache'
 import Modal from './components/Modal'
 import { message } from './i18n'
 import type { InpaintStage } from './adapters/inpainting'
-import { warmupInpaint } from './adapters/runtime'
+import { getSession, withRuntime, warmupInpaint } from './adapters/runtime'
 import type { UpscaleStatus } from './adapters/superResolution'
 import { historyReducer } from './history'
 import { getUpscalePlan } from './imageSize'
@@ -38,6 +39,20 @@ interface EditorProps {
 
 function createEmptyLine(): BrushStroke {
   return { pts: [] }
+}
+
+function drawingArea(container: HTMLElement) {
+  const padding = getComputedStyle(container)
+  return {
+    width:
+      container.clientWidth -
+      parseFloat(padding.paddingLeft) -
+      parseFloat(padding.paddingRight),
+    height:
+      container.clientHeight -
+      parseFloat(padding.paddingTop) -
+      parseFloat(padding.paddingBottom),
+  }
 }
 
 const BRUSH_HIDE_ON_SLIDER_CHANGE_TIMEOUT = 2000
@@ -82,6 +97,13 @@ export default function Editor(props: EditorProps) {
   const operationRef = useRef<AbortController>()
   const [cancelling, setCancelling] = useState(false)
   const toolbarRef = useRef<HTMLFieldSetElement>(null)
+  useEffect(() => {
+    // Import removes the focused file input or example button. Restore a useful
+    // keyboard starting point without stealing focus from navigation or dialogs.
+    if (isOriginalLoaded && document.activeElement === document.body) {
+      toolbarRef.current?.focus({ preventScroll: true })
+    }
+  }, [isOriginalLoaded])
   const [ownedEntries] = useState(() => new Map<number, HistoryEntry>())
   const nextEntryId = useRef(0)
   useLayoutEffect(() => {
@@ -184,16 +206,14 @@ export default function Editor(props: EditorProps) {
       if (!canvasContainer) {
         return
       }
-      const padding = getComputedStyle(canvasContainer)
-      const divWidth =
-        canvasContainer.clientWidth -
-        parseFloat(padding.paddingLeft) -
-        parseFloat(padding.paddingRight)
-      const divHeight =
-        canvasContainer.clientHeight -
-        parseFloat(padding.paddingTop) -
-        parseFloat(padding.paddingBottom)
-      if (!currRender.width || !currRender.height || !divWidth || !divHeight) {
+      const { width: divWidth, height: divHeight } =
+        drawingArea(canvasContainer)
+      if (
+        !currRender.width ||
+        !currRender.height ||
+        divWidth <= 0 ||
+        divHeight <= 0
+      ) {
         return
       }
 
@@ -249,20 +269,25 @@ export default function Editor(props: EditorProps) {
   }, [context])
 
   useEffect(() => {
-    if (!isInpaintingLoading) draw()
-  }, [isInpaintingLoading, draw])
+    if (isOriginalLoaded && !isInpaintingLoading) draw()
+  }, [isOriginalLoaded, isInpaintingLoading, draw])
 
   // Toolbars and translated labels can resize the workspace without a window
   // resize. Observe the actual container and batch redraws into one frame.
   useEffect(() => {
     const container = canvasDiv.current
     if (!container || !context || !isOriginalLoaded) return
-    draw()
+    // Source changes are painted above. Ignore the observer's initial delivery
+    // when layout has not changed, avoiding a second full image draw.
+    let area = drawingArea(container)
     let frame: number | undefined
     const observer = new ResizeObserver(() => {
+      const next = drawingArea(container)
+      if (next.width === area.width && next.height === area.height) return
       if (frame !== undefined) return
       frame = window.requestAnimationFrame(() => {
         frame = undefined
+        area = drawingArea(container)
         draw()
       })
     })
@@ -281,17 +306,24 @@ export default function Editor(props: EditorProps) {
     }
     let activePointerId: number | null = null
     let paintFrame: number | undefined
+    let brushFrame: number | undefined
+    let brushX = 0
+    let brushY = 0
     const cancelPaintFrame = () => {
       if (paintFrame !== undefined) window.cancelAnimationFrame(paintFrame)
       paintFrame = undefined
     }
 
     const updateBrushPosition = (ev: PointerEvent) => {
-      if (brushRef.current) {
-        const x = ev.clientX - scaledBrushSize / 2
-        const y = ev.clientY - scaledBrushSize / 2
-
-        brushRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`
+      brushX = ev.clientX - scaledBrushSize / 2
+      brushY = ev.clientY - scaledBrushSize / 2
+      if (brushFrame === undefined) {
+        brushFrame = window.requestAnimationFrame(() => {
+          brushFrame = undefined
+          if (brushRef.current) {
+            brushRef.current.style.transform = `translate3d(${brushX}px, ${brushY}px, 0)`
+          }
+        })
       }
     }
     const getCanvasPoint = (ev: PointerEvent) => {
@@ -302,6 +334,9 @@ export default function Editor(props: EditorProps) {
       }
     }
     const onPaint = (px: number, py: number) => {
+      // Pressure-only pen events can repeat a position without changing the mask.
+      const lastPoint = currentLineRef.current.pts.at(-1)
+      if (lastPoint?.x === px && lastPoint?.y === py) return
       currentLineRef.current.pts.push({ x: px, y: py })
       if (paintFrame === undefined) {
         paintFrame = window.requestAnimationFrame(() => {
@@ -387,7 +422,8 @@ export default function Editor(props: EditorProps) {
         processingBusy.current ||
         activePointerId !== null ||
         showOriginal ||
-        (ev.pointerType === 'mouse' && ev.button !== 0)
+        !ev.isPrimary ||
+        ev.button !== 0
       ) {
         return
       }
@@ -438,10 +474,29 @@ export default function Editor(props: EditorProps) {
     const onVisibilityChange = () => {
       if (document.hidden) onWindowBlur()
     }
+    const onStrokeKeyDown = (event: KeyboardEvent) => {
+      if (
+        activePointerId === null ||
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        document.querySelector(
+          'dialog[open], [role="dialog"][aria-modal="true"]'
+        )
+      )
+        return
+      event.preventDefault()
+      cancelActiveStroke()
+    }
 
-    const onPointerEnter = () => {
+    const onPointerEnter = (ev: PointerEvent) => {
       window.clearTimeout(hideBrushTimeoutRef.current)
-      setShowBrush(!showOriginal)
+      updateBrushPosition(ev)
+      setShowBrush(!showOriginal && !processingBusy.current && isOriginalLoaded)
     }
     const onPointerLeave = () => setShowBrush(false)
 
@@ -453,15 +508,20 @@ export default function Editor(props: EditorProps) {
     canvas.addEventListener('pointerenter', onPointerEnter)
     canvas.addEventListener('pointerleave', onPointerLeave)
     window.addEventListener('blur', onWindowBlur)
+    window.addEventListener('keydown', onStrokeKeyDown)
     document.addEventListener('visibilitychange', onVisibilityChange)
 
     return () => {
       cancelPaintFrame()
+      if (brushFrame !== undefined) window.cancelAnimationFrame(brushFrame)
       if (activePointerId !== null) {
         if (canvas.hasPointerCapture(activePointerId)) {
           canvas.releasePointerCapture(activePointerId)
         }
         currentLineRef.current = createEmptyLine()
+        // Changing brush settings replaces these handlers mid-stroke. Remove
+        // the cancelled preview too, even when the canvas size/history is stable.
+        if (mountedRef.current) draw()
       }
       canvas.removeEventListener('pointerdown', onPointerStart)
       canvas.removeEventListener('pointermove', onPointerMove)
@@ -471,6 +531,7 @@ export default function Editor(props: EditorProps) {
       canvas.removeEventListener('pointerenter', onPointerEnter)
       canvas.removeEventListener('pointerleave', onPointerLeave)
       window.removeEventListener('blur', onWindowBlur)
+      window.removeEventListener('keydown', onStrokeKeyDown)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [
@@ -537,19 +598,33 @@ export default function Editor(props: EditorProps) {
     const handler = (event: KeyboardEvent) => {
       const target = event.target
       if (
-        processingBusy.current ||
         event.defaultPrevented ||
         event.altKey ||
         event.isComposing ||
         document.querySelector(
           'dialog[open], [role="dialog"][aria-modal="true"]'
-        ) ||
-        (target instanceof HTMLElement &&
-          (target.isContentEditable ||
-            target.closest('input, textarea, select, dialog, [role="dialog"]')))
+        )
       ) {
         return
       }
+      if (processingBusy.current) {
+        if (
+          event.key === 'Escape' &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.shiftKey
+        ) {
+          event.preventDefault()
+          cancelProcessing()
+        }
+        return
+      }
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.closest('input, textarea, select, dialog, [role="dialog"]'))
+      )
+        return
       const key = event.key.toLowerCase()
       const modifier = event.metaKey || event.ctrlKey
       const isUndo = modifier && key === 'z' && !event.shiftKey
@@ -568,7 +643,7 @@ export default function Editor(props: EditorProps) {
     return () => {
       window.removeEventListener('keydown', handler)
     }
-  }, [canUndo, canRedo, undo, redo])
+  }, [canUndo, canRedo, undo, redo, cancelProcessing])
 
   const backTo = useCallback((index: number) => {
     if (processingBusy.current) return
@@ -598,7 +673,7 @@ export default function Editor(props: EditorProps) {
             <img
               src={render.thumbnail}
               alt={`${historyStepLabel} ${render.id}`}
-              className="rounded-sm object-contain"
+              className="transparency-grid rounded-sm object-contain"
               style={{
                 width: '112px',
                 height: '90px',
@@ -652,13 +727,22 @@ export default function Editor(props: EditorProps) {
   )
 
   const handleSliderStart = () => {
-    setShowBrush(true)
+    handleSliderChange(brushSize)
   }
   const handleSliderChange = (sliderValue: number) => {
     setShowBrush(true)
     if (brushRef.current) {
-      const x = document.documentElement.clientWidth / 2 - sliderValue / 2
-      const y = document.documentElement.clientHeight / 2 - sliderValue / 2
+      const rect = context?.canvas.getBoundingClientRect()
+      const x =
+        (rect
+          ? rect.left + rect.width / 2
+          : document.documentElement.clientWidth / 2) -
+        sliderValue / 2
+      const y =
+        (rect
+          ? rect.top + rect.height / 2
+          : document.documentElement.clientHeight / 2) -
+        sliderValue / 2
 
       brushRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`
     }
@@ -680,20 +764,25 @@ export default function Editor(props: EditorProps) {
     setGenerateProgress(0)
     setIsProcessingLoading(true)
     try {
-      if (
-        !(await waitForAbort(modelExists('superResolution'), loading.signal))
-      ) {
-        if (!mountedRef.current) return
-        setDownloaded(false)
-        await downloadModel(
-          'superResolution',
-          progress => {
-            if (mountedRef.current && !loading.signal.aborted)
+      // Initialize once: the runtime shares cached/downloaded bytes directly
+      // with the session, without a separate full-model existence read.
+      await withRuntime(
+        () =>
+          getSession(
+            'superResolution',
+            stage => {
+              if (mountedRef.current && !loading.signal.aborted)
+                setUpscaleStatus({ stage })
+            },
+            loading.signal,
+            ({ progress, downloading }) => {
+              if (!mountedRef.current || loading.signal.aborted) return
+              setDownloaded(!downloading || progress === 100)
               setDownloadProgress(progress)
-          },
-          loading.signal
-        )
-      }
+            }
+          ),
+        loading.signal
+      )
       loading.signal.throwIfAborted()
       if (!mountedRef.current) return
       setDownloaded(true)
@@ -795,14 +884,13 @@ export default function Editor(props: EditorProps) {
         )}
         <div className="relative flex items-center justify-center">
           <canvas
-            className="touch-none rounded-xl shadow-2xl shadow-black/20"
+            className="transparency-grid touch-none rounded-xl shadow-2xl shadow-black/20"
             style={showBrush ? { cursor: 'none' } : {}}
             ref={r => {
               if (r && !context) {
                 const ctx = r.getContext('2d')
-                if (ctx) {
-                  setContext(ctx)
-                }
+                if (!ctx) throw new Error('Unable to get editor canvas context')
+                setContext(ctx)
               }
             }}
           />
@@ -851,7 +939,10 @@ export default function Editor(props: EditorProps) {
       </div>
 
       {!downloaded && (
-        <Modal ariaLabel={message('upscaleing_model_download_message')}>
+        <Modal
+          ariaLabel={message('upscaleing_model_download_message')}
+          onCancel={cancelProcessing}
+        >
           <div className="space-y-5">
             <p className="text-lg font-bold leading-7">
               {message('upscaleing_model_download_message')}

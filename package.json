@@ -16,8 +16,11 @@
     "build": "tsc && vite build",
     "typecheck": "tsc",
     "test": "node --test tests/*.test.cjs",
+    "test:memory": "node --expose-gc --test tests/runtime-memory.cjs && node tests/build-memory.cjs",
+    "test:browser": "playwright test",
+    "test:models": "node tests/real-model-smoke.cjs",
     "lint": "biome lint src vite.config.ts",
-    "check": "npm run lint && npm test && npm run build",
+    "check": "npm run lint && npm test && npm run test:memory && npm run build",
     "serve": "vite preview",
     "prepare": "husky",
     "format": "prettier --write ."
@@ -42,6 +45,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.6",
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^22.0.0",
     "@types/react": "^17.0.93",

@@ -1,7 +1,8 @@
 import { imageDataToBlob, withImage } from '../imageResources'
 /* eslint-disable no-console */
 /* eslint-disable no-plusplus */
-import { readRGB } from './preprocess'
+import { readImageChannels } from './preprocess'
+import { applyResizedAlpha } from './alpha'
 import type { InferenceSession, Tensor } from 'onnxruntime-web'
 import { getSession, withRuntime, type SessionStage } from './runtime'
 import { getUpscalePlan } from '../imageSize'
@@ -79,28 +80,23 @@ export async function tileProc(
       const tileGOffset = tileSize * tileSize
       const tileBOffset = tileSize * tileSize * 2
 
-      // padding tile 转移到上面的数据上
-      for (let yp = -tilePadding; yp < tileSizePre + tilePadding; yp++) {
-        for (let xp = -tilePadding; xp < tileSizePre + tilePadding; xp++) {
-          // 计算在data中的一维坐标，防止边缘溢出
-          let xim = i * tileSizePre + xp
-          if (xim < 0) xim = 0
-          else if (xim >= imageW) xim = imageW - 1
-
-          // 计算在data中的一维坐标，防止边缘溢出
-          let yim = j * tileSizePre + yp
-          if (yim < 0) yim = 0
-          else if (yim >= imageH) yim = imageH - 1
-
-          const idx = xim + yim * imageW
-
-          const xt = xp + tilePadding
-          const yt = yp + tilePadding
-          // const idx = (i * tileSize + x) + (j * tileSize + y) * imageW;
-          // 主要转化到一维的坐标上，
-          tileData[xt + yt * tileSize + tileROffset] = data[idx + rOffset]
-          tileData[xt + yt * tileSize + tileGOffset] = data[idx + gOffset]
-          tileData[xt + yt * tileSize + tileBOffset] = data[idx + bOffset]
+      // Clamp the row once and advance contiguous source/target indices.
+      // All 64 × 64 values are overwritten, including replicated edge padding.
+      const sourceLeft = i * tileSizePre - tilePadding
+      for (let yt = 0; yt < tileSize; yt++) {
+        const yim = Math.max(
+          0,
+          Math.min(imageH - 1, j * tileSizePre + yt - tilePadding)
+        )
+        const sourceRow = yim * imageW
+        const targetRow = yt * tileSize
+        for (let xt = 0; xt < tileSize; xt++) {
+          const xim = Math.max(0, Math.min(imageW - 1, sourceLeft + xt))
+          const idx = sourceRow + xim
+          const target = targetRow + xt
+          tileData[target + tileROffset] = data[idx + rOffset]
+          tileData[target + tileGOffset] = data[idx + gOffset]
+          tileData[target + tileBOffset] = data[idx + bOffset]
         }
       }
 
@@ -110,49 +106,52 @@ export async function tileProc(
         tileSize,
         tileSize,
       ])
-      const r = await session.run({ [session.inputNames[0]]: tile })
-      signal?.throwIfAborted()
-      const results = {
-        output: r[session.outputNames[0]],
-      }
-      if (!(results.output?.data instanceof Float32Array)) {
-        throw new TypeError('Expected a float32 output tensor')
-      }
-
-      const outTileW = tileW * 4
-      const outTileH = tileH * 4
-      const outTileSize = tileSize * 4
-      if (
-        results.output.dims.join(',') !== `1,3,${outTileSize},${outTileSize}` ||
-        results.output.data.length !== 3 * outTileSize * outTileSize
-      ) {
-        throw new Error(
-          `Unexpected 4x model output shape or data length: ${results.output.dims.join(' × ')}`
-        )
-      }
-      const outTileSizePre = tileSizePre * 4
-
-      const outTileROffset = 0
-      const outTileGOffset = outTileSize * outTileSize
-      const outTileBOffset = outTileSize * outTileSize * 2
-
-      // add tile to output，直接输出
-      for (let y = 0; y < outTileH; y++) {
-        for (let x = 0; x < outTileW; x++) {
-          const xim = i * outTileSizePre + x
-          const yim = j * outTileSizePre + y
-          const outputIndex = (xim + yim * outImageW) * 4
-          const xt = x + tilePadding * 4
-          const yt = y + tilePadding * 4
-          outputData[outputIndex] =
-            results.output.data[xt + yt * outTileSize + outTileROffset] * 255
-          outputData[outputIndex + 1] =
-            results.output.data[xt + yt * outTileSize + outTileGOffset] * 255
-          outputData[outputIndex + 2] =
-            results.output.data[xt + yt * outTileSize + outTileBOffset] * 255
-          outputData[outputIndex + 3] = 255
+      // Consume the output in a separate callback so the async loop does not
+      // retain the previous tile's tensor while awaiting the next inference.
+      await session.run({ [session.inputNames[0]]: tile }).then(r => {
+        signal?.throwIfAborted()
+        const results = {
+          output: r[session.outputNames[0]],
         }
-      }
+        if (!(results.output?.data instanceof Float32Array)) {
+          throw new TypeError('Expected a float32 output tensor')
+        }
+
+        const outTileW = tileW * 4
+        const outTileH = tileH * 4
+        const outTileSize = tileSize * 4
+        if (
+          results.output.dims.join(',') !==
+            `1,3,${outTileSize},${outTileSize}` ||
+          results.output.data.length !== 3 * outTileSize * outTileSize
+        ) {
+          throw new Error(
+            `Unexpected 4x model output shape or data length: ${results.output.dims.join(' × ')}`
+          )
+        }
+        const outTileSizePre = tileSizePre * 4
+
+        const outTileROffset = 0
+        const outTileGOffset = outTileSize * outTileSize
+        const outTileBOffset = outTileSize * outTileSize * 2
+
+        const output = results.output.data
+        for (let y = 0; y < outTileH; y++) {
+          let outputIndex =
+            ((j * outTileSizePre + y) * outImageW + i * outTileSizePre) * 4
+          let sourceIndex =
+            (y + tilePadding * 4) * outTileSize + tilePadding * 4
+          const end = sourceIndex + outTileW
+          for (; sourceIndex < end; sourceIndex++, outputIndex += 4) {
+            outputData[outputIndex] = output[sourceIndex + outTileROffset] * 255
+            outputData[outputIndex + 1] =
+              output[sourceIndex + outTileGOffset] * 255
+            outputData[outputIndex + 2] =
+              output[sourceIndex + outTileBOffset] * 255
+            outputData[outputIndex + 3] = 255
+          }
+        }
+      })
       currentTile++
       callback(Math.round(100 * (currentTile / numTiles)))
     }
@@ -160,6 +159,27 @@ export async function tileProc(
   signal?.throwIfAborted()
   return new ImageData(outputData, outImageW, outImageH)
 }
+
+async function upscalePixels(
+  image: HTMLImageElement,
+  session: InferenceSession,
+  callback: (progress: number) => void,
+  onStatus?: (status: UpscaleStatus) => void,
+  signal?: AbortSignal
+) {
+  const { rgb, alpha } = await readImageChannels(image, true, signal)
+  const input = new ort.Tensor('float32', rgb, [
+    1,
+    3,
+    image.naturalHeight,
+    image.naturalWidth,
+  ])
+  const result = await tileProc(input, session, callback, onStatus, signal)
+  // Only the output and alpha survive into postprocessing; the full RGB input
+  // must not remain in the awaiting function's scope during alpha resizing.
+  return { result, alpha }
+}
+
 export default function run(
   source: File | HTMLImageElement,
   callback: (progress: number) => void,
@@ -179,14 +199,8 @@ export default function run(
         )
         signal?.throwIfAborted()
         onStatus?.({ stage: 'processing_prepare' })
-        const input = new ort.Tensor('float32', readRGB(image, true), [
-          1,
-          3,
-          height,
-          width,
-        ])
-        const result = await tileProc(
-          input,
+        const { result, alpha } = await upscalePixels(
+          image,
           session,
           callback,
           onStatus,
@@ -194,6 +208,7 @@ export default function run(
         )
         signal?.throwIfAborted()
         onStatus?.({ stage: 'processing_output' })
+        await applyResizedAlpha(result, alpha, width, height, signal)
         return imageDataToBlob(result, signal)
       }),
     signal

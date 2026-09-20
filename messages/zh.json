@@ -1,6 +1,6 @@
 {
   "$schema": "https://inlang.com/schema/inlang-message-format",
-  "drop_zone": "点击 或者 拖拽到这里",
+  "drop_zone": "点击、拖拽或粘贴图片",
   "try_it_images": "试一试:",
   "workspace_eyebrow": "浏览器内 AI 修图",
   "workspace_title": "选择图片，涂抹需要移除的内容",
@@ -45,6 +45,8 @@
   "progress_unknown": "正在进行…",
   "processing_description": "处理在本地浏览器中进行，可能需要一些时间。",
   "processing_model": "正在读取或下载模型…",
+  "model_download_timeout": "连续 30 秒未收到模型数据，请检查网络后重试。",
+  "model_cache_read_timeout": "读取模型缓存超时，请重试或刷新页面。",
   "processing_prepare": "正在准备图片和涂抹区域…",
   "processing_inference": "正在修复图片，大图可能需要较长时间…",
   "processing_output": "正在生成结果图片…",

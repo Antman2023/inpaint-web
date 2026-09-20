@@ -1,41 +1,10 @@
 const assert = require('node:assert/strict')
 const { readFileSync } = require('node:fs')
-const { resolve, dirname } = require('node:path')
+const { resolve } = require('node:path')
 const { test } = require('node:test')
 const ts = require('typescript')
 
-// Compile the production module with browser dependencies supplied by each test.
-function loadModule(path, dependencies = {}, globals = {}) {
-  const source = readFileSync(resolve(__dirname, '..', path), 'utf8')
-  const { outputText } = ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-      esModuleInterop: true,
-    },
-  })
-  const module = { exports: {} }
-  new Function(
-    'require',
-    'module',
-    'exports',
-    ...Object.keys(globals),
-    outputText
-  )(
-    name => {
-      if (name in dependencies) return dependencies[name]
-      if (name.startsWith('.')) {
-        const target = resolve(__dirname, '..', dirname(path), name)
-        return loadModule(target + '.ts', dependencies, globals)
-      }
-      return require(name)
-    },
-    module,
-    module.exports,
-    ...Object.values(globals)
-  )
-  return module.exports
-}
+const { loadModule } = require('./load-module.cjs')
 
 function languageHarness(storage, language = 'en-US') {
   return loadModule(
@@ -382,6 +351,52 @@ test('oversized example streams are cancelled before downloading the entire resp
   assert.equal(timers.size, 0)
 })
 
+test('oversized example errors and retries do not wait for stream cancellation', async () => {
+  let finishCancellation,
+    cancelled = false,
+    settled = false
+  const body = new ReadableStream(
+    {
+      pull(controller) {
+        controller.enqueue(new Uint8Array(10 * 1024 * 1024 + 1))
+      },
+      cancel() {
+        cancelled = true
+        return new Promise(resolve => {
+          finishCancellation = resolve
+        })
+      },
+    },
+    { highWaterMark: 0 }
+  )
+  const { importer, states, timers } = importHarness({
+    fetch: async () =>
+      new Response(body, { headers: { 'content-type': 'image/png' } }),
+  })
+  const operation = importer.load('/large.png').then(() => {
+    settled = true
+  })
+  try {
+    // Flush promise work without resolving the remote cancellation promise.
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(cancelled, true)
+    assert.equal(settled, true)
+    assert.equal(states.at(-1).error, 'file_too_large')
+    assert.equal(body.locked, false)
+    assert.equal(timers.size, 0)
+    const file = new File(['image'], 'retry.png', { type: 'image/png' })
+    await importer.load(file)
+    assert.equal(states.at(-1).file, file)
+    finishCancellation()
+    await operation
+    assert.equal(states.at(-1).file, file)
+  } finally {
+    finishCancellation?.()
+    importer.dispose()
+    await operation
+  }
+})
+
 test('example streams accept the exact size limit and parse the image MIME', async () => {
   let received
   const { importer, states } = importHarness({
@@ -417,15 +432,75 @@ test('broken example streams release the reader and allow a subsequent import', 
   assert.equal(states.at(-1).status, 'ready')
 })
 
-test('failed example HTTP responses are reported without decoding their body', async () => {
-  const { importer, states } = importHarness({
-    fetch: async () => new Response('missing', { status: 404 }),
+for (const { status, headers, error } of [
+  { status: 404, headers: {}, error: 'example_load_failed (404)' },
+  {
+    status: 200,
+    headers: { 'content-type': 'text/html' },
+    error: 'invalid_file',
+  },
+  { status: 200, headers: {}, error: 'invalid_file' },
+  {
+    status: 206,
+    headers: { 'content-type': 'image/png' },
+    error: 'image_import_failed',
+  },
+  {
+    status: 200,
+    headers: { 'content-type': 'image/png', 'content-range': 'bytes 0-9/100' },
+    error: 'image_import_failed',
+  },
+]) {
+  test(`invalid example response is cancelled before reading: ${status} ${JSON.stringify(headers)}`, async () => {
+    let cancelled = false,
+      reads = 0,
+      decoded = 0
+    const body = new ReadableStream(
+      {
+        pull() {
+          reads++
+        },
+        cancel() {
+          cancelled = true
+        },
+      },
+      { highWaterMark: 0 }
+    )
+    const { importer, states, timers } = importHarness({
+      fetch: async () => new Response(body, { status, headers }),
+      resize: async file => {
+        decoded++
+        return { file }
+      },
+    })
+    await importer.load('/example.png')
+    assert.deepEqual(states.at(-1), { status: 'error', error })
+    assert.equal(cancelled, true)
+    assert.equal(body.locked, false)
+    assert.equal(reads, 0)
+    assert.equal(decoded, 0)
+    assert.equal(timers.size, 0)
+    await importer.load(new File(['image'], 'valid.png', { type: 'image/png' }))
+    assert.equal(states.at(-1).status, 'ready')
   })
-  await importer.load('/examples/missing.jpeg')
+}
+
+test('empty example responses fail before image decoding', async () => {
+  let decoded = false
+  const { importer, states } = importHarness({
+    fetch: async () =>
+      new Response('', { headers: { 'content-type': 'image/png' } }),
+    resize: async file => {
+      decoded = true
+      return { file }
+    },
+  })
+  await importer.load('/empty.png')
   assert.deepEqual(states.at(-1), {
     status: 'error',
-    error: 'example_load_failed (404)',
+    error: 'image_import_failed',
   })
+  assert.equal(decoded, false)
 })
 
 function cacheHarness(fetch, globals = {}, storage = {}) {
@@ -433,6 +508,7 @@ function cacheHarness(fetch, globals = {}, storage = {}) {
   const cache = loadModule(
     'src/adapters/cache.ts',
     {
+      '../i18n': { message: key => key },
       localforage: {
         config() {},
         async getItem(key) {
@@ -448,6 +524,98 @@ function cacheHarness(fetch, globals = {}, storage = {}) {
   )
   return { cache, stored }
 }
+
+test('stalled cache reads release shared downloads and ignore late results after retry', async () => {
+  const timers = new Map()
+  let reads = 0,
+    finishRead,
+    timerId = 0
+  const expected = new Uint8Array([7, 8]).buffer
+  const { cache } = cacheHarness(
+    async () => assert.fail('cached models should not need the network'),
+    {
+      setTimeout(callback, delay) {
+        assert.equal(delay, 30_000)
+        timers.set(++timerId, callback)
+        return timerId
+      },
+      clearTimeout: id => timers.delete(id),
+    },
+    {
+      getItem() {
+        reads++
+        return reads === 1
+          ? new Promise(resolve => { finishRead = resolve })
+          : Promise.resolve(expected)
+      },
+    }
+  )
+  const firstProgress = []
+  const first = cache.downloadModel('inpaint', p => firstProgress.push(p))
+  const second = cache.ensureModel('inpaint')
+  const failures = [first, second].map(operation =>
+    assert.rejects(operation, /model_cache_read_timeout/)
+  )
+  await new Promise(setImmediate)
+  assert.equal(reads, 1)
+  assert.equal(timers.size, 1)
+  timers.values().next().value()
+  await Promise.all(failures)
+  assert.equal(timers.size, 0)
+  assert.equal(await cache.ensureModel('inpaint'), expected)
+  finishRead(new Uint8Array([99]).buffer)
+  await new Promise(setImmediate)
+  assert.deepEqual(firstProgress, [null])
+  assert.equal(await cache.ensureModel('inpaint'), expected)
+  assert.equal(timers.size, 0)
+})
+
+test('large model assembly yields across chunk boundaries and lets a waiter cancel', async () => {
+  const first = new Uint8Array(3 * 1024 * 1024).fill(17)
+  const second = new Uint8Array(14 * 1024 * 1024 + 3).fill(239)
+  const controller = new AbortController()
+  let yields = 0
+  const { cache, stored } = cacheHarness(
+    async () =>
+      new Response(
+        new ReadableStream({
+          start(stream) {
+            stream.enqueue(first)
+            stream.enqueue(second)
+            stream.close()
+          },
+        })
+      ),
+    {
+      setTimeout(callback, delay) {
+        if (delay !== 0) return setTimeout(callback, delay)
+        return setTimeout(() => {
+          yields++
+          assert.equal(stored.size, 0)
+          if (yields === 1) controller.abort()
+          callback()
+        }, 0)
+      },
+    }
+  )
+  const abandonedProgress = []
+  const abandoned = cache.downloadModel(
+    'inpaint',
+    p => abandonedProgress.push(p),
+    controller.signal
+  )
+  const rejection = assert.rejects(abandoned, { name: 'AbortError' })
+  const retained = cache.downloadModel('inpaint', () => {})
+  await rejection
+  assert.equal(stored.size, 0)
+  const data = new Uint8Array(await retained)
+  assert.equal(yields, 2)
+  assert.equal(data.length, first.length + second.length)
+  assert.deepEqual(data.subarray(0, first.length), first)
+  assert.deepEqual(data.subarray(first.length), second)
+  assert.equal(stored.size, 1)
+  assert.equal(abandonedProgress.includes(100), false)
+})
 
 test('concurrent callers share a download and cached calls avoid the network', async () => {
   let requests = 0
@@ -471,6 +639,191 @@ test('concurrent callers share a download and cached calls avoid the network', a
     new Uint8Array([1, 2, 3])
   )
   assert.equal(requests, 1)
+})
+
+test('concurrent model initialization reuses downloaded bytes without reading them back from storage', async () => {
+  let reads = 0,
+    requests = 0,
+    saved
+  const { cache } = cacheHarness(
+    async () => {
+      requests++
+      return new Response(new Uint8Array([1, 2, 3]))
+    },
+    {},
+    {
+      async getItem() {
+        reads++
+        // IndexedDB deserialization produces a separate buffer on every read.
+        return saved?.slice(0) ?? null
+      },
+      async setItem(_key, value) {
+        saved = value
+      },
+    }
+  )
+  const [first, second] = await Promise.all([
+    cache.ensureModel('inpaint'),
+    cache.ensureModel('inpaint'),
+  ])
+  assert.equal(requests, 1)
+  assert.equal(reads, 1)
+  assert.equal(first, saved)
+  assert.equal(second, first)
+  assert.deepEqual(new Uint8Array(first), new Uint8Array([1, 2, 3]))
+  const cached = await cache.ensureModel('inpaint')
+  assert.equal(reads, 2)
+  assert.equal(requests, 1)
+  assert.notEqual(cached, first)
+  assert.deepEqual(new Uint8Array(cached), new Uint8Array(first))
+})
+
+test('model initialization never receives bytes when persistence fails and can retry', async () => {
+  let fail = true,
+    requests = 0,
+    saved
+  const { cache } = cacheHarness(
+    async () => {
+      requests++
+      return new Response(new Uint8Array([7]))
+    },
+    {},
+    {
+      async getItem() {
+        return saved ?? null
+      },
+      async setItem(_key, value) {
+        if (fail) throw new Error('quota exceeded')
+        saved = value
+      },
+    }
+  )
+  await assert.rejects(cache.ensureModel('inpaint'), /quota exceeded/)
+  assert.equal(requests, 1)
+  fail = false
+  assert.deepEqual(
+    new Uint8Array(await cache.ensureModel('inpaint')),
+    new Uint8Array([7])
+  )
+  assert.equal(requests, 2)
+})
+
+test('model progress distinguishes cached bytes from a network download', async () => {
+  const { cache } = cacheHarness(async () => new Response(new Uint8Array([7])))
+  const network = [],
+    cached = []
+  await cache.ensureModel('superResolution', (progress, downloading) =>
+    network.push({ progress, downloading })
+  )
+  await cache.ensureModel('superResolution', (progress, downloading) =>
+    cached.push({ progress, downloading })
+  )
+  assert.deepEqual(network, [
+    { progress: null, downloading: false },
+    { progress: null, downloading: true },
+    { progress: 100, downloading: true },
+  ])
+  assert.deepEqual(cached, [
+    { progress: null, downloading: false },
+    { progress: 100, downloading: false },
+  ])
+})
+
+test('session model progress is replayed to new waiters and detaches on cancellation', async () => {
+  let report, finish
+  const gate = new Promise(resolve => {
+    finish = resolve
+  })
+  const runtime = loadModule(
+    'src/adapters/runtime.ts',
+    {
+      './cache': {
+        ensureModel: async (_type, progress) => {
+          report = progress
+          await gate
+          return new ArrayBuffer(1)
+        },
+      },
+      './util': {
+        getCapabilities: async () => ({ webgpu: false, simd: true }),
+        loadingOnnxruntime: async () => {},
+        runtimeBase: '/',
+      },
+    },
+    {
+      ort: {
+        env: { wasm: {} },
+        InferenceSession: { create: async () => ({}) },
+      },
+    }
+  )
+  const first = [],
+    second = []
+  const controller = new AbortController()
+  const abandoned = runtime.getSession(
+    'superResolution',
+    undefined,
+    controller.signal,
+    value => first.push(value)
+  )
+  const rejection = assert.rejects(abandoned, { name: 'AbortError' })
+  await new Promise(setImmediate)
+  report(35, true)
+  const retained = runtime.getSession(
+    'superResolution',
+    undefined,
+    undefined,
+    value => second.push(value)
+  )
+  controller.abort()
+  await rejection
+  report(100, true)
+  finish()
+  await retained
+  assert.deepEqual(first, [{ progress: 35, downloading: true }])
+  assert.deepEqual(second, [
+    { progress: 35, downloading: true },
+    { progress: 100, downloading: true },
+  ])
+})
+
+test('small download chunks notify only when the displayed tenth-percent changes', async () => {
+  const progress = []
+  let chunks = 0,
+    timersCreated = 0
+  const { cache } = cacheHarness(
+    async () =>
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            if (chunks++ < 10_000) controller.enqueue(new Uint8Array([7]))
+            else controller.close()
+          },
+        }),
+        { headers: { 'content-length': '10000' } }
+      ),
+    {
+      setTimeout(...args) {
+        timersCreated++
+        return setTimeout(...args)
+      },
+    }
+  )
+  await cache.downloadModel('inpaint', value => progress.push(value))
+  assert.ok(
+    progress.length <= 994,
+    `${progress.length} progress callbacks for 10,000 chunks`
+  )
+  assert.equal(progress[0], null)
+  assert.equal(progress[1], null) // Cache lookup transitions to network download.
+  assert.equal(timersCreated, 2) // One cache-read timer and one download timer.
+  assert.equal(progress.at(-1), 100)
+  assert.ok(progress.includes(99))
+  for (let i = 2; i < progress.length; i++) {
+    assert.notEqual(progress[i], progress[i - 1])
+    assert.equal(progress[i], Number(progress[i].toFixed(1)))
+  }
+  assert.equal((await cache.loadModel('inpaint')).byteLength, 10_000)
 })
 
 test('downloads without a usable content length remain indeterminate until cached', async () => {
@@ -630,6 +983,46 @@ test('binary models accept missing or generic MIME types and compressed transfer
   }
 })
 
+test('compressed model responses stay indeterminate until decoded bytes are cached', async () => {
+  for (const encoding of ['gzip', 'br', ' GZIP ', 'gzip, br']) {
+    const progress = []
+    const bytes = new Uint8Array([1, 2, 3, 4])
+    const { cache } = cacheHarness(
+      async () =>
+        new Response(bytes, {
+          headers: { 'content-encoding': encoding, 'content-length': '2' },
+        })
+    )
+    await cache.downloadModel('inpaint', value => progress.push(value))
+    assert.ok(
+      progress.slice(0, -1).every(value => value === null),
+      encoding
+    )
+    assert.equal(progress.at(-1), 100)
+    assert.deepEqual(new Uint8Array(await cache.loadModel('inpaint')), bytes)
+  }
+})
+
+test('identity model responses retain byte progress while invalid lengths stay indeterminate', async () => {
+  for (const length of ['4', '1.5', 'Infinity', '9007199254740992']) {
+    const progress = []
+    const { cache } = cacheHarness(
+      async () =>
+        new Response(new Uint8Array([1, 2, 3, 4]), {
+          headers: { 'content-encoding': 'identity', 'content-length': length },
+        })
+    )
+    await cache.downloadModel('inpaint', value => progress.push(value))
+    if (length === '4') assert.ok(progress.includes(99))
+    else
+      assert.ok(
+        progress.slice(0, -1).every(value => value === null),
+        length
+      )
+    assert.equal(progress.at(-1), 100)
+  }
+})
+
 test('cache write failure does not redownload and the next attempt can recover', async () => {
   let requests = 0,
     fail = true
@@ -661,23 +1054,173 @@ test('cache write failure does not redownload and the next attempt can recover',
   assert.equal(progress.at(-1), 100)
 })
 
+function fastDownloadClock() {
+  let now = 0
+  return {
+    performance: { now: () => now },
+    setTimeout: callback =>
+      setTimeout(() => {
+        now += 30_000
+        callback()
+      }, 5),
+  }
+}
+
 test('a stalled request aborts and falls back to the backup URL', async () => {
   let requests = 0
-  const { cache } = cacheHarness(
-    async (_url, { signal }) => {
-      if (++requests === 1) {
-        return new Promise((_resolve, reject) => {
-          signal.addEventListener('abort', () => reject(new Error('timeout')), {
-            once: true,
-          })
+  const { cache } = cacheHarness(async (_url, { signal }) => {
+    if (++requests === 1) {
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('timeout')), {
+          once: true,
         })
-      }
-      return new Response(new Uint8Array([5]))
-    },
-    { setTimeout: callback => setTimeout(callback, 5) }
-  )
+      })
+    }
+    return new Response(new Uint8Array([5]))
+  }, fastDownloadClock())
   await cache.downloadModel('inpaint', () => {})
   assert.equal(requests, 2)
+})
+
+test('a stalled partial model releases its reader and caches only the backup response', async () => {
+  const timers = new Map()
+  let now = 0,
+    timerId = 0,
+    requests = 0,
+    stream,
+    body
+  const progress = []
+  const { cache, stored } = cacheHarness(
+    async (_url, { signal }) => {
+      if (++requests > 1) return new Response(new Uint8Array([7, 8]))
+      body = new ReadableStream({
+        start(controller) {
+          stream = controller
+          controller.enqueue(new Uint8Array([1, 2, 3]))
+          controller.enqueue(new Uint8Array(0))
+        },
+      })
+      signal.addEventListener(
+        'abort',
+        () => stream.error(new DOMException('Aborted', 'AbortError')),
+        { once: true }
+      )
+      return new Response(body, { headers: { 'content-length': '10' } })
+    },
+    {
+      performance: { now: () => now },
+      setTimeout: callback => {
+        timers.set(++timerId, callback)
+        return timerId
+      },
+      clearTimeout: id => timers.delete(id),
+    }
+  )
+  const operation = cache.downloadModel('inpaint', value =>
+    progress.push(value)
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(timerId, 2, 'chunks reuse the idle timer after the cache read')
+  assert.equal(timers.size, 1)
+  assert.equal(progress.at(-1), 30)
+  assert.equal(stored.size, 0)
+  now = 30_000
+  timers.values().next().value()
+  await operation
+  assert.equal(requests, 2)
+  assert.equal(body.locked, false)
+  assert.equal(timers.size, 0)
+  assert.deepEqual(Array.from(new Uint8Array([...stored.values()][0])), [7, 8])
+  assert.equal(progress.at(-1), 100)
+})
+
+test('active downloads reschedule the idle check and empty chunks do not extend the deadline', async () => {
+  let now = 0,
+    timerId = 0,
+    stream,
+    firstSignal,
+    requests = 0
+  const timers = new Map()
+  const { cache } = cacheHarness(
+    async (_url, { signal }) => {
+      if (++requests > 1) return new Response(new Uint8Array([9]))
+      firstSignal = signal
+      const body = new ReadableStream({
+        start(controller) {
+          stream = controller
+        },
+      })
+      signal.addEventListener('abort', () => stream.error(signal.reason), {
+        once: true,
+      })
+      return new Response(body)
+    },
+    {
+      performance: { now: () => now },
+      setTimeout(fn, delay) {
+        timers.set(++timerId, { fn, delay })
+        return timerId
+      },
+      clearTimeout(id) {
+        timers.delete(id)
+      },
+    }
+  )
+  const fire = () => {
+    const [id, timer] = timers.entries().next().value
+    timers.delete(id)
+    timer.fn()
+    return timer.delay
+  }
+  const download = cache.downloadModel('inpaint', () => {})
+  await new Promise(setImmediate)
+  now = 20_000
+  stream.enqueue(new Uint8Array([1]))
+  await new Promise(setImmediate)
+  now = 30_000
+  assert.equal(fire(), 30_000)
+  assert.equal(firstSignal.aborted, false)
+  assert.equal(timers.size, 1)
+  assert.equal(timers.values().next().value.delay, 20_000)
+  now = 45_000
+  stream.enqueue(new Uint8Array(0))
+  await new Promise(setImmediate)
+  now = 50_000
+  assert.equal(fire(), 20_000)
+  assert.equal(firstSignal.aborted, true)
+  await download
+  assert.equal(requests, 2)
+  assert.equal(timers.size, 0)
+  assert.deepEqual(
+    new Uint8Array(await cache.loadModel('inpaint')),
+    new Uint8Array([9])
+  )
+})
+
+test('timeouts on both model addresses report the reason and leave downloads retryable', async () => {
+  let stall = true,
+    requests = 0
+  const { cache, stored } = cacheHarness(async (_url, { signal }) => {
+    requests++
+    if (!stall) return new Response(new Uint8Array([1, 2]))
+    return new Promise((_resolve, reject) =>
+      signal.addEventListener(
+        'abort',
+        () => reject(new DOMException('Aborted', 'AbortError')),
+        { once: true }
+      )
+    )
+  }, fastDownloadClock())
+  await assert.rejects(
+    cache.downloadModel('inpaint', () => {}),
+    /model_download_timeout/
+  )
+  assert.equal(requests, 2)
+  assert.equal(stored.size, 0)
+  stall = false
+  await cache.downloadModel('inpaint', () => {})
+  assert.equal(requests, 3)
+  assert.equal(stored.size, 1)
 })
 
 function imageHarness({
@@ -898,6 +1441,7 @@ function runtimeHarness({
   failDownload = false,
   createSession = async () => {},
   releaseSession = async () => {},
+  loadRuntime = async () => {},
 } = {}) {
   const events = []
   const runtimeLoads = []
@@ -921,6 +1465,7 @@ function runtimeHarness({
         getCapabilities: async () => ({ webgpu: true, simd: true }),
         loadingOnnxruntime: async (compatible, reset) => {
           runtimeLoads.push({ compatible, reset })
+          await loadRuntime()
         },
         runtimeBase: 'https://runtime.test/',
       },
@@ -954,6 +1499,35 @@ function runtimeHarness({
     },
   }
 }
+
+test('session availability tracks shared initialization, failure, and repair', async () => {
+  let finish,
+    fail = true
+  const gate = new Promise(resolve => {
+    finish = resolve
+  })
+  const { runtime } = runtimeHarness({
+    createSession: async () => {
+      await gate
+      if (fail) throw new Error('initialization failed')
+    },
+  })
+  assert.equal(runtime.hasSession('superResolution'), false)
+  const first = runtime.getSession('superResolution')
+  const rejected = assert.rejects(first, /initialization failed/)
+  assert.equal(runtime.hasSession('superResolution'), true)
+  assert.equal(runtime.hasSession('inpaint'), false)
+  finish()
+  await rejected
+  assert.equal(runtime.hasSession('superResolution'), false)
+  fail = false
+  await runtime.getSession('superResolution')
+  assert.equal(runtime.hasSession('superResolution'), true)
+  const repairing = runtime.repairRuntime(() => {})
+  assert.equal(runtime.hasSession('superResolution'), false)
+  await repairing
+  assert.equal(runtime.hasSession('superResolution'), true)
+})
 
 test('GPU initialization failure falls back once and concurrent callers share the WASM session', async () => {
   const { runtime, events, runtimeLoads } = runtimeHarness({
@@ -1268,11 +1842,12 @@ test('runtime loader falls back to another CDN and repair replaces the failed ru
   await context.exports.loadingOnnxruntime(true)
   assert.match(urls[0], /cdn.jsdelivr.net/)
   assert.match(urls[1], /unpkg.com/)
-  assert.equal(removed, 1)
+  assert.equal(removed, 2)
   const oldRuntime = context.ort
   await context.exports.loadingOnnxruntime(true, true)
   assert.notEqual(context.ort, oldRuntime)
   assert.equal(context.ort.generation, 3)
+  assert.equal(removed, 3)
   assert.match(urls[2], /ort.wasm.min.js$/)
 })
 
@@ -1426,6 +2001,53 @@ function runtimeScriptHarness({ appendError = false } = {}) {
   return { context, scripts, timers, loader: context.exports }
 }
 
+test('session startup shares one GPU probe between script and backend selection', async () => {
+  for (const available of [true, false]) {
+    const { context, scripts, loader } = runtimeScriptHarness()
+    let probes = 0
+    context.navigator = {
+      gpu: {
+        requestAdapter: async () => {
+          probes++
+          return available ? {} : null
+        },
+      },
+    }
+    const providers = []
+    const ort = {
+      env: { wasm: {} },
+      InferenceSession: {
+        create: async (_model, options) => {
+          providers.push(options.executionProviders[0])
+          return {}
+        },
+      },
+    }
+    const runtime = loadModule(
+      'src/adapters/runtime.ts',
+      {
+        './util': loader,
+        './cache': { ensureModel: async () => new ArrayBuffer(1) },
+      },
+      { ort }
+    )
+    const task = runtime.getSession('inpaint')
+    await new Promise(setImmediate)
+    assert.equal(scripts.length, 1)
+    assert.match(
+      scripts[0].src,
+      available ? /ort.webgpu.min.js$/ : /ort.wasm.min.js$/
+    )
+    context.ort = ort
+    scripts[0].onload()
+    await task
+    assert.equal(probes, 1)
+    assert.deepEqual(providers, [available ? 'webgpu' : 'wasm'])
+    assert.equal(await runtime.getSession('inpaint'), await task)
+    assert.equal(probes, 1)
+  }
+})
+
 test('runtime timeout cleans handlers before fallback and ignores late events', async () => {
   const { context, scripts, timers, loader } = runtimeScriptHarness()
   const task = loader.loadingOnnxruntime(true)
@@ -1448,6 +2070,7 @@ test('runtime timeout cleans handlers before fallback and ignores late events', 
   assert.equal(timers.size, 0)
   assert.equal(scripts[1].onload, null)
   assert.equal(scripts[1].onerror, null)
+  assert.equal(scripts[1].removed, true)
 })
 
 test('repair alternates CDN sources and keeps WASM on the successful source', async () => {
@@ -1468,6 +2091,8 @@ test('repair alternates CDN sources and keeps WASM on the successful source', as
   scripts[3].onload()
   await repaired
   assert.match(loader.runtimeBase, /cdn.jsdelivr.net/)
+  assert.ok(scripts.every(script => script.removed))
+  assert.ok(context.ort)
 })
 
 test('synchronous script insertion failure clears timers and permits retry', async () => {
@@ -1521,8 +2146,9 @@ test('repair cannot reset the runtime while editor warmup is initializing', asyn
 const pixelFixture = new Uint8ClampedArray([
   255, 0, 128, 255, 10, 20, 30, 255, 254, 254, 254, 255, 255, 255, 255, 255,
 ])
-function preprocessHarness(failure, pixels = pixelFixture) {
+function preprocessHarness(failure, pixels = pixelFixture, globals = {}) {
   const draws = []
+  const reads = []
   const canvas = {
     getContext: () =>
       failure === 'context'
@@ -1532,34 +2158,40 @@ function preprocessHarness(failure, pixels = pixelFixture) {
               if (failure === 'draw') throw new Error('draw failed')
               draws.push(args)
             },
-            getImageData: () => {
+            getImageData: (x, y, width, height) => {
               if (failure === 'read') throw new Error('read failed')
-              return { data: pixels }
+              reads.push({ x, y, width, height })
+              return {
+                data: pixels.subarray(y * width * 4, (y + height) * width * 4),
+              }
             },
           },
   }
   return {
     canvas,
     draws,
+    reads,
     adapter: loadModule(
       'src/adapters/preprocess.ts',
       {},
       {
         document: { createElement: () => canvas },
+        ...globals,
       }
     ),
   }
 }
 
-test('Canvas RGB conversion retains natural resolution, CHW order and normalization', () => {
+test('Canvas RGB conversion retains natural resolution, CHW order and normalization', async () => {
   const { adapter, canvas, draws } = preprocessHarness()
   const image = { naturalWidth: 2, naturalHeight: 2, width: 20, height: 10 }
   const expected = new Uint8Array([
     255, 10, 254, 255, 0, 20, 254, 255, 128, 30, 254, 255,
   ])
-  assert.deepEqual(adapter.readRGB(image), expected)
+  assert.deepEqual((await adapter.readImageChannels(image)).rgb, expected)
+  assert.equal((await adapter.readImageChannels(image)).alpha, undefined)
   assert.deepEqual(
-    adapter.readRGB(image, true),
+    (await adapter.readImageChannels(image, true)).rgb,
     Float32Array.from(expected, n => n / 255)
   )
   assert.deepEqual(draws[0].slice(1), [0, 0, 2, 2])
@@ -1567,7 +2199,41 @@ test('Canvas RGB conversion retains natural resolution, CHW order and normalizat
   assert.equal(canvas.height, 0)
 })
 
-test('Canvas masks preserve the old white threshold, near-white and transparent edges', () => {
+test('inpaint preprocessing extracts RGB and original opacity in a single canvas read', async () => {
+  const { adapter, canvas, draws } = preprocessHarness(
+    undefined,
+    new Uint8ClampedArray([0, 0, 0, 0, 20, 40, 60, 128, 70, 80, 90, 255])
+  )
+  const result = await adapter.readImageChannels({
+    naturalWidth: 3,
+    naturalHeight: 1,
+  })
+  assert.deepEqual(
+    result.rgb,
+    new Uint8Array([0, 20, 70, 0, 40, 80, 0, 60, 90])
+  )
+  assert.deepEqual(result.alpha, new Uint8Array([0, 128, 255]))
+  assert.equal(draws.length, 1)
+  assert.equal(canvas.width, 0)
+  assert.equal(canvas.height, 0)
+})
+
+test('a late transparent pixel retains earlier opaque pixels in the optional alpha plane', async () => {
+  for (const normalize of [false, true]) {
+    const { adapter } = preprocessHarness(
+      undefined,
+      new Uint8ClampedArray([10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 128])
+    )
+    const result = await adapter.readImageChannels(
+      { naturalWidth: 3, naturalHeight: 1 },
+      normalize
+    )
+    assert.deepEqual(result.alpha, new Uint8Array([255, 255, 128]))
+    assert.equal(result.rgb instanceof Float32Array, normalize)
+  }
+})
+
+test('Canvas masks preserve the old white threshold, near-white and transparent edges', async () => {
   const pixels = new Uint8ClampedArray([
     0, 0, 0, 0, 255, 255, 255, 255, 254, 254, 254, 255, 255, 255, 254, 255, 254,
     255, 255, 255, 255, 254, 255, 255, 255, 255, 255, 1, 128, 128, 128, 128,
@@ -1575,7 +2241,7 @@ test('Canvas masks preserve the old white threshold, near-white and transparent 
   const { adapter, canvas, draws } = preprocessHarness(undefined, pixels)
   const source = { width: 2, height: 2 }
   assert.deepEqual(
-    adapter.readResizedMask(source, 4, 2),
+    await adapter.readResizedMask(source, 4, 2),
     new Uint8Array([255, 0, 255, 0, 0, 255, 0, 255])
   )
   assert.deepEqual(draws[0], [source, 0, 0, 4, 2])
@@ -1584,9 +2250,9 @@ test('Canvas masks preserve the old white threshold, near-white and transparent 
 })
 
 for (const failure of ['context', 'draw', 'read']) {
-  test(`pixel preprocessing releases its canvas after ${failure} fails`, () => {
+  test(`pixel preprocessing releases its canvas after ${failure} fails`, async () => {
     const { adapter, canvas } = preprocessHarness(failure)
-    assert.throws(
+    await assert.rejects(
       () => adapter.readMask({ width: 2, height: 2 }),
       /context|draw|read/
     )
@@ -1595,7 +2261,246 @@ for (const failure of ['context', 'draw', 'read']) {
   })
 }
 
-function upscaleHarness({ runtime = {}, globals = {} } = {}) {
+for (const mode of ['rgb', 'normalized', 'mask']) {
+  const convert = (adapter, signal) => {
+    const image = { naturalWidth: 1000, naturalHeight: 1001 }
+    return mode === 'mask'
+      ? adapter.readResizedMask(image, 1000, 1001, signal)
+      : adapter.readImageChannels(image, mode === 'normalized', signal)
+  }
+  test(`${mode} preprocessing skips canvas readback when already cancelled`, async () => {
+    const { adapter, draws } = preprocessHarness()
+    const controller = new AbortController()
+    controller.abort()
+    await assert.rejects(convert(adapter, controller.signal), {
+      name: 'AbortError',
+    })
+    assert.equal(draws.length, 0)
+  })
+  test(`${mode} preprocessing cancels between pixel batches and releases its canvas`, async () => {
+    const controller = new AbortController()
+    let yields = 0
+    const { adapter, draws, canvas } = preprocessHarness(
+      undefined,
+      new Uint8ClampedArray(1_001_000 * 4).fill(255),
+      {
+        setTimeout(callback) {
+          if (++yields === 3) controller.abort()
+          queueMicrotask(callback)
+        },
+      }
+    )
+    await assert.rejects(convert(adapter, controller.signal), {
+      name: 'AbortError',
+    })
+    assert.equal(yields, 3)
+    assert.equal(draws.length, 1)
+    assert.equal(canvas.width, 0)
+    assert.equal(canvas.height, 0)
+  })
+}
+
+test('strip readback preserves RGB, opacity and mask values across boundaries and the final row', async () => {
+  const width = 1000,
+    height = 1001,
+    size = width * height
+  const pixels = new Uint8ClampedArray(size * 4).fill(255)
+  const samples = [0, 999_999, 1_000_000, size - 1]
+  for (const i of samples) pixels.set([10, 20, 30, 128], i * 4)
+  for (const normalize of [false, true]) {
+    const { adapter, reads, draws, canvas } = preprocessHarness(
+      undefined,
+      pixels
+    )
+    const result = await adapter.readImageChannels(
+      { naturalWidth: width, naturalHeight: height },
+      normalize
+    )
+    const expected = normalize
+      ? Float32Array.from([10, 20, 30], v => v / 255)
+      : [10, 20, 30]
+    for (const i of samples) {
+      assert.deepEqual(
+        [result.rgb[i], result.rgb[size + i], result.rgb[size * 2 + i]],
+        [...expected]
+      )
+      assert.equal(result.alpha[i], 128)
+    }
+    assert.equal(result.alpha[1], 255)
+    assert.equal(result.rgb[1], normalize ? 1 : 255)
+    assert.deepEqual(reads, [
+      { x: 0, y: 0, width, height: 1000 },
+      { x: 0, y: 1000, width, height: 1 },
+    ])
+    assert.equal(draws.length, 1)
+    assert.equal(canvas.width, 0)
+    assert.equal(canvas.height, 0)
+  }
+  const { adapter } = preprocessHarness(undefined, pixels)
+  const mask = await adapter.readResizedMask({ width, height }, width, height)
+  for (const i of samples) assert.equal(mask[i], 255)
+  assert.equal(mask[1], 0)
+})
+
+test('alpha scaling preserves RGB and interpolates horizontal and vertical edges', async () => {
+  const { applyResizedAlpha } = loadModule('src/adapters/alpha.ts')
+  for (const vertical of [false, true]) {
+    const width = vertical ? 4 : 8,
+      height = vertical ? 8 : 4
+    const result = {
+      width,
+      height,
+      data: new Uint8ClampedArray(width * height * 4).fill(73),
+    }
+    await applyResizedAlpha(
+      result,
+      new Uint8Array([0, 255]),
+      vertical ? 1 : 2,
+      vertical ? 2 : 1
+    )
+    const expected = [0, 0, 32, 96, 159, 223, 255, 255]
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const offset = (y * width + x) * 4
+        assert.deepEqual(
+          Array.from(result.data.slice(offset, offset + 3)),
+          [73, 73, 73]
+        )
+        assert.equal(result.data[offset + 3], expected[vertical ? y : x])
+      }
+  }
+})
+
+test('alpha scaling handles constant opacity and single-pixel sources', async () => {
+  const { applyResizedAlpha } = loadModule('src/adapters/alpha.ts')
+  for (const opacity of [0, 128, 255]) {
+    const result = {
+      width: 4,
+      height: 4,
+      data: new Uint8ClampedArray(64).fill(255),
+    }
+    await applyResizedAlpha(result, new Uint8Array([opacity]), 1, 1)
+    assert.ok(
+      result.data.every(
+        (value, index) => value === (index % 4 === 3 ? opacity : 255)
+      )
+    )
+  }
+})
+
+test('alpha scaling cancellation stops before writing the next batch', async () => {
+  const controller = new AbortController()
+  let yields = 0
+  const { applyResizedAlpha } = loadModule(
+    'src/adapters/alpha.ts',
+    {},
+    {
+      setTimeout: callback => {
+        if (++yields === 2) controller.abort()
+        queueMicrotask(callback)
+      },
+    }
+  )
+  const result = {
+    width: 1000,
+    height: 1001,
+    data: new Uint8ClampedArray(1000 * 1001 * 4).fill(255),
+  }
+  await assert.rejects(
+    applyResizedAlpha(result, new Uint8Array([0]), 1, 1, controller.signal),
+    { name: 'AbortError' }
+  )
+  assert.equal(yields, 2)
+  assert.equal(result.data[3], 0)
+  assert.equal(result.data[999999 * 4 + 3], 0)
+  assert.equal(result.data[1000000 * 4 + 3], 255)
+  assert.equal(result.data.at(-1), 255)
+})
+
+test('missing alpha skips scaling without scheduling work or changing RGB', async () => {
+  const { applyResizedAlpha } = loadModule(
+    'src/adapters/alpha.ts',
+    {},
+    {
+      setTimeout: () => assert.fail('opaque images do not schedule alpha work'),
+    }
+  )
+  const result = {
+    width: 1,
+    height: 1,
+    data: new Uint8ClampedArray([10, 20, 30, 255]),
+  }
+  await applyResizedAlpha(result, undefined, 1, 1)
+  assert.deepEqual(Array.from(result.data), [10, 20, 30, 255])
+})
+
+test('already cancelled alpha scaling does not schedule or modify pixels', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  const { applyResizedAlpha } = loadModule(
+    'src/adapters/alpha.ts',
+    {},
+    {
+      setTimeout: () => assert.fail('must not schedule cancelled work'),
+    }
+  )
+  const result = {
+    width: 1,
+    height: 1,
+    data: new Uint8ClampedArray([1, 2, 3, 255]),
+  }
+  await assert.rejects(
+    applyResizedAlpha(result, new Uint8Array([0]), 1, 1, controller.signal),
+    { name: 'AbortError' }
+  )
+  assert.deepEqual(Array.from(result.data), [1, 2, 3, 255])
+})
+
+test('upscale applies source alpha to the model result before PNG encoding', async () => {
+  let encoded
+  const { adapter } = upscaleHarness({
+    runtime: {
+      withRuntime: task => task(),
+      getSession: async () => ({
+        inputNames: ['input'],
+        outputNames: ['output'],
+        run: async () => ({
+          output: {
+            data: new Float32Array(3 * 256 * 256).fill(1),
+            dims: [1, 3, 256, 256],
+          },
+        }),
+      }),
+    },
+    preprocess: {
+      readImageChannels: (_image, normalized) => {
+        assert.equal(normalized, true)
+        return { rgb: new Float32Array(6), alpha: new Uint8Array([0, 255]) }
+      },
+    },
+    resources: {
+      withImage: (image, _signal, task) => task(image),
+      imageDataToBlob: async result => {
+        encoded = result
+        return new Blob(['png'])
+      },
+    },
+  })
+  await adapter.default({ naturalWidth: 2, naturalHeight: 1 }, () => {})
+  assert.equal(encoded.width, 8)
+  assert.equal(encoded.height, 4)
+  assert.deepEqual(
+    Array.from(encoded.data.filter((_v, i) => i < 32 && i % 4 === 3)),
+    [0, 0, 32, 96, 159, 223, 255, 255]
+  )
+})
+
+function upscaleHarness({
+  runtime = {},
+  globals = {},
+  preprocess = {},
+  resources,
+} = {}) {
   class Tensor {
     constructor(type, data, dims) {
       Object.assign(this, { type, data, dims })
@@ -1605,8 +2510,9 @@ function upscaleHarness({ runtime = {}, globals = {} } = {}) {
     'src/adapters/superResolution.ts',
     {
       '../utils': loadModule('src/utils.ts'),
-      '../imageResources': loadModule('src/imageResources.ts', {}, globals),
-      './preprocess': {},
+      '../imageResources':
+        resources ?? loadModule('src/imageResources.ts', {}, globals),
+      './preprocess': preprocess,
       './runtime': runtime,
       '../imageSize': loadModule('src/imageSize.ts'),
       '../i18n': { message: key => key },
@@ -1626,60 +2532,86 @@ function upscaleHarness({ runtime = {}, globals = {} } = {}) {
   return { adapter, Tensor }
 }
 
-test('4x tiles use model I/O names and stitch edges with correct RGB and dimensions', async () => {
-  const { adapter, Tensor } = upscaleHarness()
-  const width = 53,
-    height = 55,
-    plane = width * height
-  const input = new Float32Array(plane * 3)
-  for (let i = 0; i < input.length; i++) input[i] = (i % 251) / 255
-  const statuses = [],
-    progress = []
-  let runs = 0
-  const tileBuffers = new Set()
-  const session = {
-    inputNames: ['rgb'],
-    outputNames: ['upscaled'],
-    run: async feeds => {
-      assert.equal(statuses.at(-1).tile, ++runs)
-      const tile = feeds.rgb
-      assert.ok(tile)
-      tileBuffers.add(tile.data.buffer)
-      const data = new Float32Array(3 * 256 * 256)
-      for (let c = 0; c < 3; c++)
-        for (let y = 0; y < 256; y++)
-          for (let x = 0; x < 256; x++) {
-            data[c * 256 * 256 + y * 256 + x] =
-              tile.data[
-                c * 64 * 64 + Math.floor(y / 4) * 64 + Math.floor(x / 4)
-              ]
-          }
-      return { upscaled: new Tensor('float32', data, [1, 3, 256, 256]) }
-    },
-  }
-  const result = await adapter.tileProc(
-    new Tensor('float32', input, [1, 3, height, width]),
-    session,
-    p => progress.push(p),
-    status => statuses.push(status)
-  )
-  assert.equal(result.width, width * 4)
-  assert.equal(result.height, height * 4)
-  assert.equal(runs, 4)
-  assert.equal(tileBuffers.size, 1)
-  for (let y = 0; y < result.height; y++)
-    for (let x = 0; x < result.width; x++) {
-      const source = Math.floor(y / 4) * width + Math.floor(x / 4)
-      const dest = (y * result.width + x) * 4
-      for (let c = 0; c < 3; c++)
-        assert.equal(
-          result.data[dest + c],
-          Math.round(input[c * plane + source] * 255)
-        )
-      assert.equal(result.data[dest + 3], 255)
+for (const [width, height] of [
+  [1, 1],
+  [1, 55],
+  [55, 1],
+  [52, 52],
+  [53, 55],
+]) {
+  test(`4x tiles preserve padding and RGB at ${width} × ${height}`, async () => {
+    const { adapter, Tensor } = upscaleHarness()
+    const plane = width * height
+    const tilesY = Math.ceil(height / 52)
+    const totalTiles = Math.ceil(width / 52) * tilesY
+    const input = new Float32Array(plane * 3)
+    for (let i = 0; i < input.length; i++) input[i] = (i % 251) / 255
+    const statuses = [],
+      progress = []
+    let runs = 0
+    const tileBuffers = new Set()
+    const session = {
+      inputNames: ['rgb'],
+      outputNames: ['upscaled'],
+      run: async feeds => {
+        assert.equal(statuses.at(-1).tile, ++runs)
+        const tile = feeds.rgb
+        assert.ok(tile)
+        tileBuffers.add(tile.data.buffer)
+        const tileX = Math.floor((runs - 1) / tilesY)
+        const tileY = (runs - 1) % tilesY
+        // Check the entire model input, including padding that is cropped from output.
+        for (let c = 0; c < 3; c++)
+          for (let y = 0; y < 64; y++)
+            for (let x = 0; x < 64; x++) {
+              const sx = Math.max(0, Math.min(width - 1, tileX * 52 + x - 6))
+              const sy = Math.max(0, Math.min(height - 1, tileY * 52 + y - 6))
+              assert.equal(
+                tile.data[c * 4096 + y * 64 + x],
+                input[c * plane + sy * width + sx]
+              )
+            }
+        const data = new Float32Array(3 * 256 * 256)
+        for (let c = 0; c < 3; c++)
+          for (let y = 0; y < 256; y++)
+            for (let x = 0; x < 256; x++) {
+              data[c * 256 * 256 + y * 256 + x] =
+                tile.data[
+                  c * 64 * 64 + Math.floor(y / 4) * 64 + Math.floor(x / 4)
+                ]
+            }
+        return { upscaled: new Tensor('float32', data, [1, 3, 256, 256]) }
+      },
     }
-  assert.deepEqual(progress, [25, 50, 75, 100])
-})
+    const result = await adapter.tileProc(
+      new Tensor('float32', input, [1, 3, height, width]),
+      session,
+      p => progress.push(p),
+      status => statuses.push(status)
+    )
+    assert.equal(result.width, width * 4)
+    assert.equal(result.height, height * 4)
+    assert.equal(runs, totalTiles)
+    assert.equal(tileBuffers.size, 1)
+    for (let y = 0; y < result.height; y++)
+      for (let x = 0; x < result.width; x++) {
+        const source = Math.floor(y / 4) * width + Math.floor(x / 4)
+        const dest = (y * result.width + x) * 4
+        for (let c = 0; c < 3; c++)
+          assert.equal(
+            result.data[dest + c],
+            Math.round(input[c * plane + source] * 255)
+          )
+        assert.equal(result.data[dest + 3], 255)
+      }
+    assert.deepEqual(
+      progress,
+      Array.from({ length: totalTiles }, (_, i) =>
+        Math.round((100 * (i + 1)) / totalTiles)
+      )
+    )
+  })
+}
 
 test('4x upscaling rejects incompatible output before reporting completion', async () => {
   const { adapter, Tensor } = upscaleHarness()
@@ -1752,7 +2684,8 @@ function inpaintOutputHarness(
   output,
   encodeError = false,
   runSession = async () => ({ result: output }),
-  runtimeOverride
+  runtimeOverride,
+  alpha
 ) {
   let rendered
   const images = []
@@ -1785,7 +2718,7 @@ function inpaintOutputHarness(
     {
       '../utils': loadModule('src/utils.ts'),
       './preprocess': {
-        readRGB: () => new Uint8Array(6),
+        readImageChannels: () => ({ rgb: new Uint8Array(6), alpha }),
         readResizedMask: () => new Uint8Array(2),
       },
       './runtime': {
@@ -1900,6 +2833,78 @@ test('inpainting converts valid planar output to RGBA without changing pixels', 
   assert.deepEqual(
     rendered().data,
     new Uint8ClampedArray([1, 3, 5, 255, 2, 4, 6, 255])
+  )
+})
+
+test('inpainting preserves transparent and partially transparent source pixels', async () => {
+  const { run, rendered } = inpaintOutputHarness(
+    {
+      data: new Uint8Array([1, 2, 3, 4, 5, 6]),
+      dims: [1, 3, 1, 2],
+    },
+    false,
+    undefined,
+    undefined,
+    new Uint8Array([0, 128])
+  )
+  await run()
+  assert.deepEqual(
+    rendered().data,
+    new Uint8ClampedArray([1, 3, 5, 0, 2, 4, 6, 128])
+  )
+})
+
+test('inpaint output conversion yields between batches and never returns cancelled pixels', async () => {
+  const controller = new AbortController()
+  let yields = 0,
+    images = 0
+  const { planarToImageData } = loadModule(
+    'src/adapters/postprocess.ts',
+    {},
+    {
+      setTimeout: callback => {
+        if (++yields === 2) controller.abort()
+        queueMicrotask(callback)
+      },
+      ImageData: class {
+        constructor() {
+          images++
+        }
+      },
+    }
+  )
+  await assert.rejects(
+    planarToImageData(
+      new Uint8Array(3_000_003),
+      undefined,
+      1_000_001,
+      1,
+      controller.signal
+    ),
+    { name: 'AbortError' }
+  )
+  assert.equal(yields, 2)
+  assert.equal(images, 0)
+})
+
+test('cancelled inpaint output conversion performs no allocation or scheduling', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  const { planarToImageData } = loadModule(
+    'src/adapters/postprocess.ts',
+    {},
+    {
+      setTimeout: () => assert.fail('must not schedule'),
+      Uint8ClampedArray: class {
+        constructor() {
+          assert.fail('must not allocate')
+        }
+      },
+    }
+  )
+  await assert.rejects(
+    planarToImageData(new Uint8Array(3), undefined, 1, 1, controller.signal),
+    { name: 'AbortError' }
   )
 })
 
@@ -2320,6 +3325,55 @@ test('cancelling a session waiter preserves shared initialization and removes it
   await retained
   assert.equal(stages.length, count)
   await runtime.repairRuntime(() => {})
+})
+
+test('cancelling one download subscription preserves another using the same callback', async () => {
+  let deliver,
+    calls = 0
+  const { cache } = cacheHarness(() => {
+    calls++
+    return new Promise(resolve => {
+      deliver = resolve
+    })
+  })
+  const progress = []
+  const listener = value => progress.push(value)
+  const controller = new AbortController()
+  const abandoned = cache.downloadModel('inpaint', listener, controller.signal)
+  const rejected = assert.rejects(abandoned, { name: 'AbortError' })
+  const retained = cache.downloadModel('inpaint', listener)
+  await new Promise(setImmediate)
+  controller.abort()
+  await rejected
+  progress.length = 0
+  deliver(new Response(new Uint8Array([1, 2, 3])))
+  await retained
+  assert.equal(calls, 1)
+  assert.equal(progress.at(-1), 100)
+})
+
+test('cancelling one session subscription preserves another using the same callback', async () => {
+  let finish
+  const gate = new Promise(resolve => {
+    finish = resolve
+  })
+  const { runtime, events } = runtimeHarness({ loadRuntime: () => gate })
+  const stages = []
+  const listener = stage => stages.push(stage)
+  const controller = new AbortController()
+  const abandoned = runtime.getSession('inpaint', listener, controller.signal)
+  const rejected = assert.rejects(abandoned, { name: 'AbortError' })
+  const retained = runtime.getSession('inpaint', listener)
+  controller.abort()
+  await rejected
+  stages.length = 0
+  finish()
+  await retained
+  assert.deepEqual(stages, ['processing_model', 'processing_initializing'])
+  assert.equal(events.filter(event => event[0] === 'create').length, 1)
+  stages.length = 0
+  await runtime.repairRuntime(() => {})
+  assert.deepEqual(stages, [])
 })
 
 test('queued cancellation settles before active inference while keeping repair blocked', async () => {

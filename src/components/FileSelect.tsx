@@ -1,15 +1,16 @@
 import { PhotographIcon } from '@heroicons/react/outline'
-import { useRef, useState } from 'react'
+import { type Ref, useRef, useState } from 'react'
 import { message } from '../i18n'
 import { IMAGE_TYPES } from '../imageImport'
 
 type FileSelectProps = {
   onSelection: (file: File) => void
   busy?: boolean
+  inputRef?: Ref<HTMLInputElement>
 }
 
 export default function FileSelect(props: FileSelectProps) {
-  const { onSelection, busy = false } = props
+  const { onSelection, busy = false, inputRef } = props
 
   const [dragHover, setDragHover] = useState(false)
   const dragDepth = useRef(0)
@@ -62,6 +63,7 @@ export default function FileSelect(props: FileSelectProps) {
         }}
       >
         <input
+          ref={inputRef}
           id={uploadElemId}
           name={uploadElemId}
           type="file"

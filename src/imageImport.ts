@@ -5,6 +5,22 @@ export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 async function readExample(response: Response) {
+  const type =
+    response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() ??
+    ''
+  let error: string | undefined
+  if (!response.ok) {
+    error = `${message('example_load_failed')} (${response.status})`
+  } else if (response.status === 206 || response.headers.has('content-range')) {
+    error = message('image_import_failed')
+  } else if (!IMAGE_TYPES.includes(type)) {
+    error = message('invalid_file')
+  }
+  if (error) {
+    // Release rejected bodies without waiting for the server to finish sending.
+    void response.body?.cancel().catch(() => {})
+    throw new Error(error)
+  }
   const reader = response.body?.getReader()
   if (!reader) throw new Error(message('image_import_failed'))
   let complete = false
@@ -21,11 +37,11 @@ async function readExample(response: Response) {
       if (bytes > MAX_IMAGE_BYTES) throw new Error(message('file_too_large'))
       chunks.push(value)
     }
-    return new Blob(chunks, {
-      type: response.headers.get('content-type')?.split(';')[0].trim() ?? '',
-    })
+    if (bytes === 0) throw new Error(message('image_import_failed'))
+    return new Blob(chunks, { type })
   } finally {
-    if (!complete) await reader.cancel().catch(() => {})
+    // A remote cancellation acknowledgement must not delay the import error.
+    if (!complete) void reader.cancel().catch(() => {})
     reader.releaseLock()
   }
 }
@@ -68,11 +84,6 @@ export function createImageImporter(
           if (active !== request) {
             void response.body?.cancel().catch(() => {})
             return
-          }
-          if (!response.ok) {
-            throw new Error(
-              `${message('example_load_failed')} (${response.status})`
-            )
           }
           const blob = await readExample(response)
           file = new File([blob], source.split('/').at(-1) ?? 'example.jpeg', {

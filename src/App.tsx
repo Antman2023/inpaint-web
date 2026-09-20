@@ -1,3 +1,5 @@
+// @refresh reset
+// Hot updates need a fresh importer because cleanup permanently disposes it.
 /* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable jsx-a11y/control-has-associated-label */
 import {
@@ -6,7 +8,14 @@ import {
   MoonIcon,
   SunIcon,
 } from '@heroicons/react/outline'
-import { lazy, Suspense, useEffect, useState } from 'react'
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
 import Button from './components/Button'
 import FileSelect from './components/FileSelect'
 import EditorBoundary from './components/EditorBoundary'
@@ -14,7 +23,11 @@ import Modal from './components/Modal'
 import { type LanguageTag, languageTag, message, setLanguageTag } from './i18n'
 import { useTheme } from './theme'
 import RepairRuntime from './components/RepairRuntime'
-import { createImageImporter, type ImageImportState } from './imageImport'
+import {
+  createImageImporter,
+  IMAGE_TYPES,
+  type ImageImportState,
+} from './imageImport'
 
 const EXAMPLE_IMAGES = ['bag', 'dog', 'car', 'bird', 'jacket', 'shoe', 'paris']
 const Editor = lazy(() => import('./Editor'))
@@ -24,6 +37,15 @@ function App() {
     status: 'idle',
   })
   const [importer] = useState(() => createImageImporter(setImageImport))
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const previousImportStatus = useRef(imageImport.status)
+  useLayoutEffect(() => {
+    const previous = previousImportStatus.current
+    previousImportStatus.current = imageImport.status
+    if (imageImport.status === 'idle' && previous !== 'idle') {
+      fileInputRef.current?.focus({ preventScroll: true })
+    }
+  }, [imageImport.status])
   const file = imageImport.status === 'ready' ? imageImport.file : undefined
   useEffect(() => () => importer.dispose(), [importer])
   const [stateLanguageTag, setStateLanguageTag] =
@@ -36,6 +58,31 @@ function App() {
   useEffect(() => {
     document.documentElement.lang = stateLanguageTag === 'zh' ? 'zh-CN' : 'en'
   }, [stateLanguageTag])
+
+  useEffect(() => {
+    if (file) return
+    const pasteImage = (event: ClipboardEvent) => {
+      const target = event.target
+      if (
+        event.defaultPrevented ||
+        document.querySelector(
+          'dialog[open], [role="dialog"][aria-modal="true"]'
+        ) ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable ||
+            target.closest('input:not([type="file"]), textarea, select')))
+      )
+        return
+      const image = Array.from(event.clipboardData?.files ?? []).find(item =>
+        IMAGE_TYPES.includes(item.type)
+      )
+      if (!image) return
+      event.preventDefault()
+      void importer.load(image)
+    }
+    window.addEventListener('paste', pasteImage)
+    return () => window.removeEventListener('paste', pasteImage)
+  }, [file, importer])
 
   useEffect(() => {
     const preventFileNavigation = (event: DragEvent) => {
@@ -156,6 +203,7 @@ function App() {
 
             <div className="mx-auto h-[clamp(15rem,34svh,21rem)] w-full max-w-3xl">
               <FileSelect
+                inputRef={fileInputRef}
                 busy={imageImport.status === 'loading'}
                 onSelection={f => {
                   void importer.load(f)

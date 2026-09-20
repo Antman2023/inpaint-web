@@ -91,7 +91,12 @@ export function useImage(
 
   useEffect(() => {
     const image = new Image()
-    const objectUrl = URL.createObjectURL(file)
+    let objectUrl: string | undefined
+    const release = () => {
+      image.removeAttribute('src')
+      if (objectUrl !== undefined) URL.revokeObjectURL(objectUrl)
+      objectUrl = undefined
+    }
     const controller = new AbortController()
     let active = true
     const timeout = setTimeout(
@@ -99,7 +104,14 @@ export function useImage(
       30_000
     )
     setState({ file, attempt, image, loaded: false })
-    void loadImage(image, objectUrl, controller.signal)
+    void Promise.resolve()
+      .then(() => {
+        // URL allocation can throw before decoding starts. Keep it in the same
+        // retryable error path, and avoid allocation after effect cleanup.
+        controller.signal.throwIfAborted()
+        objectUrl = URL.createObjectURL(file)
+        return loadImage(image, objectUrl, controller.signal)
+      })
       .then(() => {
         if (!image.naturalWidth || !image.naturalHeight) {
           throw new Error('Image has invalid dimensions')
@@ -107,6 +119,7 @@ export function useImage(
         if (active) setState({ file, attempt, image, loaded: true })
       })
       .catch(error => {
+        release()
         if (active) {
           setState({
             file,
@@ -123,8 +136,7 @@ export function useImage(
       active = false
       clearTimeout(timeout)
       controller.abort()
-      image.removeAttribute('src')
-      URL.revokeObjectURL(objectUrl)
+      release()
     }
   }, [file, attempt])
 

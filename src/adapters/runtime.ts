@@ -14,6 +14,12 @@ export type SessionStage =
   'processing_runtime' | 'processing_model' | 'processing_initializing'
 const stages = new Map<modelType, SessionStage>()
 const listeners = new Map<modelType, Set<(stage: SessionStage) => void>>()
+type ModelProgress = { progress: number | null; downloading: boolean }
+const modelProgress = new Map<modelType, ModelProgress>()
+const modelListeners = new Map<
+  modelType,
+  Set<(status: ModelProgress) => void>
+>()
 
 function notify<T>(listener: (value: T) => void, value: T) {
   try {
@@ -46,8 +52,17 @@ function runtimeAccessError() {
     )
 }
 
-export async function withRuntime<T>(
+export function withRuntime<T>(
   operation: () => Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  // The queue owns a clearable entry, not the caller's closure. Cancelled work
+  // must not retain images and masks while an earlier inference is still active.
+  return queueRuntimeOperation({ run: operation }, signal)
+}
+
+async function queueRuntimeOperation<T>(
+  work: { run?: () => Promise<T> },
   signal?: AbortSignal
 ): Promise<T> {
   signal?.throwIfAborted()
@@ -68,6 +83,9 @@ export async function withRuntime<T>(
     .then(() => {
       started = true
       signal?.throwIfAborted()
+      const operation = work.run
+      work.run = undefined
+      if (!operation) throw new Error('Queued operation is unavailable')
       return operation()
     })
     .finally(finish)
@@ -79,6 +97,7 @@ export async function withRuntime<T>(
   return new Promise<T>((resolve, reject) => {
     const abort = () => {
       if (!started) {
+        work.run = undefined
         finish()
         reject(signal?.reason)
       }
@@ -91,35 +110,47 @@ export async function withRuntime<T>(
   })
 }
 
+// Pending initialization is reusable too; getSession will await it safely.
+export function hasSession(type: modelType) {
+  return !runtimeAccessError() && sessions.has(type)
+}
+
 export function getSession(
   type: modelType,
   onStage?: (stage: SessionStage) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onModelProgress?: (status: ModelProgress) => void
 ) {
   if (signal?.aborted) return Promise.reject(signal.reason)
   const error = runtimeAccessError()
   return error
     ? Promise.reject(error)
-    : initializeSession(type, onStage, signal)
+    : initializeSession(type, onStage, signal, onModelProgress)
 }
 
 // Repair owns initialization while external access is blocked.
 function initializeSession(
   type: modelType,
   onStage?: (stage: SessionStage) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onModelProgress?: (status: ModelProgress) => void
 ) {
   let session = sessions.get(type)
   if (!session) {
+    modelProgress.delete(type)
     initializing++
     session = (async () => {
       reportStage(type, 'processing_runtime')
-      await loadingOnnxruntime(compatible)
+      // Use one probe for both the script variant and the model's backend.
+      const capabilities = await getCapabilities(compatible)
+      await loadingOnnxruntime(compatible, false, capabilities)
       reportStage(type, 'processing_model')
-      const [capabilities, model] = await Promise.all([
-        getCapabilities(compatible),
-        ensureModel(type),
-      ])
+      const model = await ensureModel(type, (progress, downloading) => {
+        const status = { progress, downloading }
+        modelProgress.set(type, status)
+        for (const listener of modelListeners.get(type) ?? [])
+          notify(listener, status)
+      })
       ort.env.wasm.wasmPaths = runtimeBase
       ort.env.wasm.numThreads = 1
       ort.env.wasm.proxy = false
@@ -149,14 +180,23 @@ function initializeSession(
       })
     sessions.set(type, session)
   }
-  if (!onStage) return waitForAbort(session, signal)
+  if (!onStage && !onModelProgress) return waitForAbort(session, signal)
   const subscribers = listeners.get(type) ?? new Set()
   listeners.set(type, subscribers)
-  subscribers.add(onStage)
-  notify(onStage, stages.get(type) ?? 'processing_runtime')
-  return waitForAbort(session, signal).finally(() =>
-    subscribers.delete(onStage)
-  )
+  // Callback identity is not subscription identity: another waiter may reuse it.
+  const listener = (stage: SessionStage) => onStage?.(stage)
+  subscribers.add(listener)
+  if (onStage) notify(onStage, stages.get(type) ?? 'processing_runtime')
+  const downloads = modelListeners.get(type) ?? new Set()
+  modelListeners.set(type, downloads)
+  const downloadListener = (status: ModelProgress) => onModelProgress?.(status)
+  downloads.add(downloadListener)
+  const current = modelProgress.get(type)
+  if (onModelProgress && current) notify(onModelProgress, current)
+  return waitForAbort(session, signal).finally(() => {
+    subscribers.delete(listener)
+    downloads.delete(downloadListener)
+  })
 }
 
 export function warmupInpaint(signal?: AbortSignal) {

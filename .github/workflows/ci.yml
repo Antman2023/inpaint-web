@@ -37,3 +37,66 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+
+  browser:
+    name: Browser regressions / ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    env:
+      HUSKY: '0'
+      PLAYWRIGHT_BROWSER: ${{ matrix.browser }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      - run: npm run test:browser
+      - name: Preserve browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: browser-failure-results-${{ matrix.browser }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  deployment:
+    name: Production container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Build production image
+        run: docker build --tag inpaint-web:smoke .
+      - name: Start production server
+        run: |
+          docker run --detach --name inpaint-smoke --publish 127.0.0.1:8080:80 inpaint-web:smoke
+          curl --retry 20 --retry-connrefused --retry-delay 1 --max-time 5 --fail --silent --show-error --output /dev/null http://127.0.0.1:8080/
+      - name: Verify production responses
+        run: node tests/deployment-smoke.cjs http://127.0.0.1:8080
+      - name: Show server logs on failure
+        if: failure()
+        run: |
+          if docker container inspect inpaint-smoke > /dev/null 2>&1; then
+            docker logs inpaint-smoke
+          fi
+      - name: Remove test container
+        if: always()
+        run: |
+          if docker container inspect inpaint-smoke > /dev/null 2>&1; then
+            docker rm --force inpaint-smoke
+          fi

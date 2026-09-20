@@ -7,6 +7,7 @@ interface ModalProps {
   children?: ReactNode
   ariaLabel: string
   onClose?: () => void
+  onCancel?: () => void
 }
 
 function focusableElements(dialog: HTMLDialogElement) {
@@ -24,7 +25,7 @@ function focusableElements(dialog: HTMLDialogElement) {
 }
 
 export default function Modal(props: ModalProps) {
-  const { children, ariaLabel, onClose } = props
+  const { children, ariaLabel, onClose, onCancel = onClose } = props
   const dialogRef = useRef<HTMLDialogElement>(null)
   const backdropPointerDown = useRef(false)
 
@@ -87,7 +88,7 @@ export default function Modal(props: ModalProps) {
       onCancel={event => {
         event.preventDefault()
         event.stopPropagation()
-        onClose?.()
+        onCancel?.()
       }}
       onPointerDown={event => {
         backdropPointerDown.current = event.target === event.currentTarget

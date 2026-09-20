@@ -66,14 +66,14 @@ export const getCapabilities = async (
   }
 }
 const version = '1.16.3'
-export const getTagSrc = async () => {
+export const getTagSrc = async (capabilities?: Capabilities) => {
   const prefix = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${version}/dist/`
-  const capablilities = await getCapabilities()
-  if (capablilities.webgpu) {
+  const detected = capabilities ?? (await getCapabilities())
+  if (detected.webgpu) {
     return `${prefix}ort.webgpu.min.js`
   }
-  if (capablilities.wasm) {
-    if (capablilities.simd || capablilities.threads) {
+  if (detected.wasm) {
+    if (detected.simd || detected.threads) {
       return `${prefix}ort.wasm.min.js`
     }
     return `${prefix}ort.wasm-core.min.js`
@@ -94,12 +94,14 @@ async function loadScript(src: string) {
       clearTimeout(timeout)
       script.onload = null
       script.onerror = null
+      // Execution has finished (or failed). Keep the runtime global, not one
+      // unused script element for every subsequent repair attempt.
+      script.remove()
     }
     const fail = () => {
       if (settled) return
       settled = true
       cleanup()
-      script.remove()
       reject(new Error(`Failed to load ONNX Runtime from ${src}`))
     }
     const timeout = setTimeout(fail, 30_000)
@@ -123,7 +125,8 @@ async function loadScript(src: string) {
 
 export const loadingOnnxruntime = (
   compatible = false,
-  reset = false
+  reset = false,
+  capabilities?: Capabilities
 ): Promise<void> => {
   if (runtimeLoading) return runtimeLoading
   if (reset) {
@@ -133,7 +136,9 @@ export const loadingOnnxruntime = (
   }
   if (typeof ort !== 'undefined') return Promise.resolve()
   runtimeLoading = (async () => {
-    const src = compatible ? `${runtimeBase}ort.wasm.min.js` : await getTagSrc()
+    const src = compatible
+      ? `${runtimeBase}ort.wasm.min.js`
+      : await getTagSrc(capabilities)
     const primaryBase = src.slice(0, src.lastIndexOf('/') + 1)
     const backupBase = primaryBase.includes('cdn.jsdelivr.net')
       ? `https://unpkg.com/onnxruntime-web@${version}/dist/`

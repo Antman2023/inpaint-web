@@ -32,6 +32,8 @@
   --accent-strong: #a8e600;
   --accent-ink: #11150a;
   --accent-detail: #486300;
+  --transparency-base: #ffffff;
+  --transparency-tile: #e0e0e0;
 }
 
 :root[data-theme='dark'] {
@@ -47,6 +49,8 @@
   --accent-strong: #d0ff48;
   --accent-ink: #101408;
   --accent-detail: #bdff01;
+  --transparency-base: #343434;
+  --transparency-tile: #464646;
 }
 
 html,
@@ -118,6 +122,18 @@ input {
 
 .theme-slider {
   accent-color: var(--accent-detail);
+}
+
+/* Display-only backing, also isolates the original from the edited image below. */
+.transparency-grid {
+  background-color: var(--transparency-base);
+  background-image: conic-gradient(
+    var(--transparency-tile) 25%,
+    transparent 0 50%,
+    var(--transparency-tile) 0 75%,
+    transparent 0
+  );
+  background-size: 16px 16px;
 }
 
 .theme-slider::-webkit-slider-thumb {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://inlang.com/schema/inlang-message-format",
-  "drop_zone": "Click or drag here",
+  "drop_zone": "Click, drop or paste an image",
   "try_it_images": "Try it:",
   "workspace_eyebrow": "IN-BROWSER AI EDITOR",
   "workspace_title": "Choose an image, then brush away distractions",
@@ -45,6 +45,8 @@
   "progress_unknown": "In progress…",
   "processing_description": "Processing is running in this browser and may take a moment.",
   "processing_model": "Reading or downloading model…",
+  "model_download_timeout": "No model data received for 30 seconds. Check your connection and retry.",
+  "model_cache_read_timeout": "Reading the model cache timed out. Please retry or reload the page.",
   "processing_prepare": "Preparing the image and painted area…",
   "processing_inference": "Repairing the image. Large images may take longer…",
   "processing_output": "Generating the result image…",

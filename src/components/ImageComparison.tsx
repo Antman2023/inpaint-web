@@ -10,7 +10,7 @@ export default function ImageComparison({ source }: { source: string }) {
         src={source}
         alt={message('original')}
         draggable={false}
-        className="pointer-events-none absolute inset-0 h-full w-full max-w-none rounded-xl"
+        className="transparency-grid pointer-events-none absolute inset-0 h-full w-full max-w-none rounded-xl"
         style={{ clipPath: `inset(0 0 0 ${position}%)` }}
       />
       <div
