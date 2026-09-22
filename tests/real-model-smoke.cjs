@@ -24,10 +24,11 @@ async function main() {
     })
     await page.goto('http://127.0.0.1:4181/')
     const result = await Promise.race([
-      page.evaluate(async verifyRepair => {
+      page.evaluate(async ({ verifyRepair, verifyWarmup }) => {
         const { runBrowserSmoke } = await import('/tests/browser-smoke.mjs')
         const options = {
           exerciseCancellation: true,
+          exerciseWarmup: verifyWarmup,
           onProgress: status => void window.reportModelSmoke(status),
         }
         const initial = await runBrowserSmoke(options)
@@ -64,7 +65,10 @@ async function main() {
           afterRepair,
           runtimeScriptElements: scripts.length,
         }
-      }, process.env.MODEL_SMOKE_REPAIR === '1'),
+      }, {
+        verifyRepair: process.env.MODEL_SMOKE_REPAIR === '1',
+        verifyWarmup: process.env.MODEL_SMOKE_WARMUP === '1',
+      }),
       new Promise((_, reject) => {
         timeout = setTimeout(
           () => reject(new Error('Real model smoke timed out after 5 minutes')),

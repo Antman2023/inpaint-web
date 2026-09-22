@@ -91,7 +91,19 @@ export default function Modal(props: ModalProps) {
         onCancel?.()
       }}
       onPointerDown={event => {
-        backdropPointerDown.current = event.target === event.currentTarget
+        backdropPointerDown.current =
+          event.isPrimary &&
+          event.button === 0 &&
+          event.target === event.currentTarget
+      }}
+      onPointerUp={event => {
+        // A drag from the backdrop into the panel may click their common
+        // ancestor (the dialog). Hit-test the release too; touch capture can
+        // keep event.target on the backdrop even after entering the panel.
+        backdropPointerDown.current =
+          backdropPointerDown.current &&
+          document.elementFromPoint(event.clientX, event.clientY) ===
+            event.currentTarget
       }}
       onPointerCancel={() => {
         backdropPointerDown.current = false

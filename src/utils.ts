@@ -1,4 +1,30 @@
 import { useCallback, useEffect, useState } from 'react'
+import { waitForAbort } from './cancellation'
+
+async function normalizeImageType(file: File, signal?: AbortSignal) {
+  // File.type comes from metadata, often the extension rather than the bytes.
+  // Decode validation is still performed by the browser before this check.
+  if (file.size < 12) return file
+  const header = new Uint8Array(
+    await waitForAbort(file.slice(0, 12).arrayBuffer(), signal)
+  )
+  let type = file.type
+  if ([137, 80, 78, 71, 13, 10, 26, 10].every((byte, i) => header[i] === byte))
+    type = 'image/png'
+  else if (header[0] === 255 && header[1] === 216 && header[2] === 255)
+    type = 'image/jpeg'
+  else if (
+    [82, 73, 70, 70].every((byte, i) => header[i] === byte) &&
+    [87, 69, 66, 80].every((byte, i) => header[i + 8] === byte)
+  )
+    type = 'image/webp'
+  return type === file.type
+    ? file
+    : new File([file], imageFileName(file.name, type), {
+        type,
+        lastModified: file.lastModified,
+      })
+}
 
 export function imageFileName(name: string, mime: string, edited = false) {
   const extension = {
@@ -176,6 +202,8 @@ export async function resizeImageFile(
     if (signal?.aborted) throw abortReason(signal)
     const { naturalWidth: width, naturalHeight: height } = image
     if (!width || !height) throw new Error('Image has invalid dimensions')
+    file = await normalizeImageType(file, signal)
+    if (signal?.aborted) throw abortReason(signal)
     const scale = Math.min(1, maxSize / Math.max(width, height))
     if (scale === 1) {
       return { file, resized: false }

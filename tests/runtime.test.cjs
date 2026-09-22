@@ -397,12 +397,52 @@ test('oversized example errors and retries do not wait for stream cancellation',
   }
 })
 
+test('encoded and malformed example lengths defer to the actual streamed size', async () => {
+  for (const headers of [
+    { 'content-length': '10485761', 'content-encoding': 'gzip' },
+    { 'content-length': '10485761', 'content-encoding': 'br' },
+    { 'content-length': 'Infinity' },
+    { 'content-length': '1e9' },
+    { 'content-length': '-10485761' },
+    { 'content-length': '10485761.5' },
+  ]) {
+    const { importer, states } = importHarness({
+      fetch: async () => new Response('decoded bytes', {
+        headers: { 'content-type': 'image/png', ...headers },
+      }),
+    })
+    await importer.load('/example.png')
+    assert.equal(states.at(-1).status, 'ready')
+    assert.equal(states.at(-1).file.size, 13)
+  }
+})
+
+test('underreported and compressed example lengths cannot bypass the stream limit', async () => {
+  for (const encoding of [undefined, 'gzip']) {
+    let cancelled = false
+    const body = new ReadableStream({
+      pull(controller) { controller.enqueue(new Uint8Array(10 * 1024 * 1024 + 1)) },
+      cancel() { cancelled = true },
+    }, { highWaterMark: 0 })
+    const { importer, states } = importHarness({
+      fetch: async () => new Response(body, { headers: {
+        'content-type': 'image/png', 'content-length': '1',
+        ...(encoding ? { 'content-encoding': encoding } : {}),
+      } }),
+    })
+    await importer.load('/example.png')
+    assert.equal(states.at(-1).error, 'file_too_large')
+    assert.equal(cancelled, true)
+    assert.equal(body.locked, false)
+  }
+})
+
 test('example streams accept the exact size limit and parse the image MIME', async () => {
   let received
   const { importer, states } = importHarness({
     fetch: async () =>
       new Response(new Uint8Array(10 * 1024 * 1024), {
-        headers: { 'content-type': 'image/png; charset=binary' },
+        headers: { 'content-type': 'image/png; charset=binary', 'content-length': '10485760' },
       }),
     resize: async file => {
       received = file
@@ -433,6 +473,8 @@ test('broken example streams release the reader and allow a subsequent import', 
 })
 
 for (const { status, headers, error } of [
+  { status: 200, headers: { 'content-type': 'image/png', 'content-length': '10485761' }, error: 'file_too_large' },
+  { status: 200, headers: { 'content-type': 'image/png', 'content-length': '10485761', 'content-encoding': ' Identity ' }, error: 'file_too_large' },
   { status: 404, headers: {}, error: 'example_load_failed (404)' },
   {
     status: 200,
@@ -1303,6 +1345,47 @@ test('very narrow images retain a nonzero dimension and release their object URL
   assert.equal(revoked(), 1)
 })
 
+test('image headers correct mislabeled formats without re-encoding small files', async () => {
+  for (const [header, type, name] of [
+    [[137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0], 'image/png', 'photo.png'],
+    [[255, 216, 255, 224, 0, 0, 0, 0, 0, 0, 0, 0], 'image/jpeg', 'photo.jpg'],
+    [[82, 73, 70, 70, 32, 0, 0, 0, 87, 69, 66, 80], 'image/webp', 'photo.webp'],
+  ]) {
+    const { utils, revoked } = imageHarness({ width: 64, height: 64 })
+    const source = new File([new Uint8Array(header)], 'photo.wrong', {
+      type: type === 'image/png' ? 'image/jpeg' : 'image/png', lastModified: 123,
+    })
+    const { file, resized } = await utils.resizeImageFile(source, 4096)
+    assert.equal(resized, false)
+    assert.equal(file.type, type)
+    assert.equal(file.name, name)
+    assert.equal(file.lastModified, 123)
+    assert.deepEqual(await file.arrayBuffer(), await source.arrayBuffer())
+    assert.equal(revoked(), 1)
+  }
+})
+
+test('cancelling a stalled image header read releases decoding resources', async () => {
+  const { utils, images, revoked } = imageHarness({ width: 64, height: 64 })
+  const source = new File([new Uint8Array(12)], 'photo.png', { type: 'image/png' })
+  let finishRead, started
+  const reading = new Promise(resolve => { started = resolve })
+  source.slice = () => ({ arrayBuffer: () => {
+    started()
+    return new Promise(resolve => { finishRead = resolve })
+  } })
+  const controller = new AbortController()
+  const operation = utils.resizeImageFile(source, 4096, controller.signal)
+  await reading
+  controller.abort()
+  await assert.rejects(operation, { name: 'AbortError' })
+  assert.equal(revoked(), 1)
+  assert.equal(images[0].sourceRemoved, true)
+  finishRead(new ArrayBuffer(12))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(revoked(), 1)
+})
+
 test('resizing uses the actual encoder MIME when the requested format falls back', async () => {
   const { utils, finishEncoding } = imageHarness({ encodePending: true })
   const resizing = utils.resizeImageFile(
@@ -1439,6 +1522,7 @@ test('failed image loading rejects once without reloading the broken source', as
 function runtimeHarness({
   cachedUpscale = false,
   failDownload = false,
+  prepareModel = async type => type,
   createSession = async () => {},
   releaseSession = async () => {},
   loadRuntime = async () => {},
@@ -1452,7 +1536,7 @@ function runtimeHarness({
     {
       './cache': {
         modelExists: async () => cachedUpscale,
-        ensureModel: async type => type,
+        ensureModel: prepareModel,
         removeCachedModel: async type => events.push(['remove', type]),
         downloadModel: async (type, progress) => {
           events.push(['download', type])
@@ -2131,6 +2215,34 @@ test('editor warmup and first inference share a single session initialization', 
   assert.equal(events.length, 1)
 })
 
+test('slow inpaint warmup does not block unrelated inference and still guards repair', async () => {
+  let finishDownload
+  const download = new Promise(resolve => { finishDownload = resolve })
+  const { runtime, events } = runtimeHarness({
+    prepareModel: type => type === 'inpaint' ? download : Promise.resolve(type),
+  })
+  const controller = new AbortController()
+  const warmup = runtime.warmupInpaint(controller.signal)
+  let ran = false
+  const upscale = runtime.withRuntime(async () => {
+    await runtime.getSession('superResolution')
+    ran = true
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(ran, true, 'Unrelated inference was held behind warmup')
+  await upscale
+  await assert.rejects(runtime.repairRuntime(() => {}), /Wait for image processing/)
+  controller.abort()
+  await assert.rejects(warmup, { name: 'AbortError' })
+  await assert.rejects(runtime.repairRuntime(() => {}), /Wait for image processing/)
+  finishDownload('inpaint')
+  await runtime.getSession('inpaint')
+  assert.deepEqual(events, [
+    ['create', 'superResolution', 'webgpu'], ['create', 'inpaint', 'webgpu'],
+  ])
+  await runtime.repairRuntime(() => {})
+})
+
 test('repair cannot reset the runtime while editor warmup is initializing', async () => {
   const { runtime } = runtimeHarness()
   const warmup = runtime.warmupInpaint()
@@ -2631,6 +2743,50 @@ test('4x upscaling rejects incompatible output before reporting completion', asy
     /Unexpected 4x model output shape/
   )
   assert.deepEqual(progress, [])
+})
+
+test('4x upscaling rejects non-finite visible pixels without running later tiles', async () => {
+  const { adapter, Tensor } = upscaleHarness()
+  for (const invalid of [NaN, Infinity, -Infinity]) {
+    for (let channel = 0; channel < 3; channel++) {
+      let runs = 0
+      const progress = []
+      await assert.rejects(adapter.tileProc(
+        new Tensor('float32', new Float32Array(3 * 105), [1, 3, 1, 105]),
+        {
+          inputNames: ['rgb'], outputNames: ['result'],
+          run: async () => {
+            const data = new Float32Array(3 * 256 * 256)
+            if (++runs === 2) data[channel * 256 * 256 + 24 * 256 + 24] = invalid
+            return { result: new Tensor('float32', data, [1, 3, 256, 256]) }
+          },
+        },
+        p => progress.push(p)
+      ), /non-finite pixel/)
+      assert.equal(runs, 2)
+      assert.deepEqual(progress, [33])
+    }
+  }
+})
+
+test('4x upscaling preserves finite color clipping and ignores discarded padding', async () => {
+  const { adapter, Tensor } = upscaleHarness()
+  const data = new Float32Array(3 * 256 * 256).fill(NaN)
+  for (let y = 24; y < 28; y++) for (let x = 24; x < 28; x++) {
+    data[y * 256 + x] = -0.25
+    data[256 * 256 + y * 256 + x] = 0.5
+    data[2 * 256 * 256 + y * 256 + x] = 1.25
+  }
+  const result = await adapter.tileProc(
+    new Tensor('float32', new Float32Array(3), [1, 3, 1, 1]),
+    {
+      inputNames: ['rgb'], outputNames: ['result'],
+      run: async () => ({ result: new Tensor('float32', data, [1, 3, 256, 256]) }),
+    },
+    () => {}
+  )
+  for (let offset = 0; offset < result.data.length; offset += 4)
+    assert.deepEqual(Array.from(result.data.slice(offset, offset + 4)), [0, 128, 255, 255])
 })
 
 test('4x upscaling rejects malformed inputs before inference or progress', async () => {

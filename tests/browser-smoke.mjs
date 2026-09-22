@@ -4,7 +4,7 @@
 // Uses real models (downloads and caches them when absent).
 import inpaint from '../src/adapters/inpainting.ts'
 import upscale from '../src/adapters/superResolution.ts'
-import { withRuntime } from '../src/adapters/runtime.ts'
+import { getSession, warmupInpaint, withRuntime } from '../src/adapters/runtime.ts'
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -50,6 +50,7 @@ export async function runBrowserSmoke({
   onProgress = console.info,
   signal,
   exerciseCancellation = false,
+  exerciseWarmup = false,
 } = {}) {
   const canvas = document.createElement('canvas')
   const mask = document.createElement('canvas')
@@ -76,6 +77,16 @@ export async function runBrowserSmoke({
     maskCtx.fillRect(36, 28, 8, 8)
     const started = performance.now()
     const timingsMs = {}
+    if (exerciseWarmup) {
+      onProgress({ operation: 'concurrent_warmup', stage: 'starting' })
+      await Promise.all([
+        warmupInpaint(signal),
+        withRuntime(() => getSession('superResolution', undefined, signal), signal),
+      ])
+      timingsMs.warmup = Math.round(performance.now() - started)
+      onProgress({ operation: 'concurrent_warmup', stage: 'passed' })
+    }
+    const cancellationStarted = performance.now()
     let cancellation
     if (exerciseCancellation) {
       signal?.throwIfAborted()
@@ -151,7 +162,7 @@ export async function runBrowserSmoke({
         queueResumed: true,
       }
       onProgress({ cancellation })
-      timingsMs.cancellation = Math.round(performance.now() - started)
+      timingsMs.cancellation = Math.round(performance.now() - cancellationStarted)
     }
     // Successful runs also verify recovery after the optional cancellation checks.
     const inpaintStarted = performance.now()

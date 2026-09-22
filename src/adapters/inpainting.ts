@@ -1,6 +1,11 @@
 import { imageDataToBlob, withImage } from '../imageResources'
 import { readImageChannels, readResizedMask } from './preprocess'
-import { getSession, withRuntime, type SessionStage } from './runtime'
+import {
+  getSession,
+  withRuntime,
+  type SessionStage,
+  type ModelProgress,
+} from './runtime'
 import { planarToImageData } from './postprocess'
 import type { InferenceSession } from 'onnxruntime-web'
 
@@ -47,12 +52,18 @@ export default function run(
   source: File | HTMLImageElement,
   mask: HTMLCanvasElement | HTMLImageElement,
   onStage?: (stage: InpaintStage) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onModelProgress?: (status: ModelProgress) => void
 ): Promise<Blob> {
   return withRuntime(
     () =>
       withImage(source, signal, async image => {
-        const session = await getSession('inpaint', onStage, signal)
+        const session = await getSession(
+          'inpaint',
+          onStage,
+          signal,
+          onModelProgress
+        )
         signal?.throwIfAborted()
         onStage?.('processing_prepare')
         const { naturalWidth: width, naturalHeight: height } = image

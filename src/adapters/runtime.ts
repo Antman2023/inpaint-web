@@ -14,7 +14,7 @@ export type SessionStage =
   'processing_runtime' | 'processing_model' | 'processing_initializing'
 const stages = new Map<modelType, SessionStage>()
 const listeners = new Map<modelType, Set<(stage: SessionStage) => void>>()
-type ModelProgress = { progress: number | null; downloading: boolean }
+export type ModelProgress = { progress: number | null; downloading: boolean }
 const modelProgress = new Map<modelType, ModelProgress>()
 const modelListeners = new Map<
   modelType,
@@ -199,10 +199,10 @@ function initializeSession(
   })
 }
 
-export function warmupInpaint(signal?: AbortSignal) {
-  return withRuntime(async () => {
-    await getSession('inpaint', undefined, signal)
-  }, signal)
+export async function warmupInpaint(signal?: AbortSignal) {
+  // Preparation is shared and guarded by `initializing`, independently of the
+  // inference queue. A slow inpaint download must not hold up cached upscaling.
+  await getSession('inpaint', undefined, signal)
 }
 
 export function repairRuntime(

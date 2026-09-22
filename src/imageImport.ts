@@ -8,6 +8,11 @@ async function readExample(response: Response) {
   const type =
     response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() ??
     ''
+  const length = response.headers.get('content-length')?.trim() ?? ''
+  const encoding = response.headers
+    .get('content-encoding')
+    ?.trim()
+    .toLowerCase()
   let error: string | undefined
   if (!response.ok) {
     error = `${message('example_load_failed')} (${response.status})`
@@ -15,6 +20,14 @@ async function readExample(response: Response) {
     error = message('image_import_failed')
   } else if (!IMAGE_TYPES.includes(type)) {
     error = message('invalid_file')
+  } else if (
+    (!encoding || encoding === 'identity') &&
+    /^\d+$/.test(length) &&
+    Number(length) > MAX_IMAGE_BYTES
+  ) {
+    // Content-Length only describes the decoded bytes for unencoded responses.
+    // Keep the streaming limit too: headers may be missing or underreported.
+    error = message('file_too_large')
   }
   if (error) {
     // Release rejected bodies without waiting for the server to finish sending.

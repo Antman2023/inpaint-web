@@ -128,6 +128,9 @@ export default function Editor(props: EditorProps) {
   const [downloaded, setDownloaded] = useState(true)
   const [downloadProgress, setDownloadProgress] = useState<number | null>(0)
   const [inpaintStage, setInpaintStage] = useState<InpaintStage | null>(null)
+  const [inpaintModelProgress, setInpaintModelProgress] = useState<
+    number | null
+  >()
   const mountedRef = useRef(true)
 
   const onloading = useCallback(() => {
@@ -142,6 +145,7 @@ export default function Editor(props: EditorProps) {
     processingBusy.current = true
     setIsProcessingLoading(true)
     setInpaintStage('processing_model')
+    setInpaintModelProgress(undefined)
     return {
       signal: controller.signal,
       close: () => {
@@ -153,6 +157,7 @@ export default function Editor(props: EditorProps) {
         if (mountedRef.current) {
           setCancelling(false)
           setInpaintStage(null)
+          setInpaintModelProgress(undefined)
           setIsProcessingLoading(false)
           if (controller.signal.aborted)
             window.requestAnimationFrame(() => {
@@ -351,8 +356,20 @@ export default function Editor(props: EditorProps) {
         return
       }
       ev.preventDefault()
-      const point = getCanvasPoint(ev)
-      onPaint(point.x, point.y)
+      // Browsers may merge several hardware samples into one pointermove.
+      // Preserve the full path while keeping drawing limited to one frame.
+      const rect = canvas.getBoundingClientRect()
+      for (const sample of ev.getCoalescedEvents?.() ?? []) {
+        onPaint(
+          (sample.clientX - rect.left) / rect.width,
+          (sample.clientY - rect.top) / rect.height
+        )
+      }
+      // Also covers unsupported APIs and events with no coalesced samples.
+      onPaint(
+        (ev.clientX - rect.left) / rect.width,
+        (ev.clientY - rect.top) / rect.height
+      )
     }
 
     const processStroke = async () => {
@@ -382,7 +399,11 @@ export default function Editor(props: EditorProps) {
             if (mountedRef.current && !loading.signal.aborted)
               setInpaintStage(stage)
           },
-          loading.signal
+          loading.signal,
+          ({ progress, downloading }) => {
+            if (mountedRef.current && !loading.signal.aborted)
+              setInpaintModelProgress(downloading ? progress : undefined)
+          }
         )
         if (!res) {
           throw new Error('empty response')
@@ -909,9 +930,18 @@ export default function Editor(props: EditorProps) {
                 {message('processing_description')}
               </p>
               {cancelling ? null : inpaintStage ? (
-                <p role="status" className="text-sm text-muted">
-                  {message(inpaintStage)}
-                </p>
+                <>
+                  <p role="status" className="text-sm text-muted">
+                    {message(inpaintStage)}
+                  </p>
+                  {inpaintStage === 'processing_model' &&
+                    inpaintModelProgress !== undefined && (
+                      <Progress
+                        percent={inpaintModelProgress}
+                        label={message('processing_model')}
+                      />
+                    )}
+                </>
               ) : (
                 <>
                   <p role="status" className="text-sm text-muted">
@@ -1034,6 +1064,7 @@ export default function Editor(props: EditorProps) {
             min={10}
             max={200}
             value={brushSize}
+            disabled={showOriginal}
             onChange={handleSliderChange}
             onStart={handleSliderStart}
           />

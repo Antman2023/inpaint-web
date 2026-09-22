@@ -143,11 +143,22 @@ export async function tileProc(
             (y + tilePadding * 4) * outTileSize + tilePadding * 4
           const end = sourceIndex + outTileW
           for (; sourceIndex < end; sourceIndex++, outputIndex += 4) {
-            outputData[outputIndex] = output[sourceIndex + outTileROffset] * 255
-            outputData[outputIndex + 1] =
-              output[sourceIndex + outTileGOffset] * 255
-            outputData[outputIndex + 2] =
-              output[sourceIndex + outTileBOffset] * 255
+            const red = output[sourceIndex + outTileROffset]
+            const green = output[sourceIndex + outTileGOffset]
+            const blue = output[sourceIndex + outTileBOffset]
+            // Typed-array conversion silently turns NaN/Infinity into black or
+            // white. Reject unusable pixels before committing an edited image.
+            if (
+              !Number.isFinite(red) ||
+              !Number.isFinite(green) ||
+              !Number.isFinite(blue)
+            )
+              throw new Error(
+                'Upscaling model returned non-finite pixel values'
+              )
+            outputData[outputIndex] = red * 255
+            outputData[outputIndex + 1] = green * 255
+            outputData[outputIndex + 2] = blue * 255
             outputData[outputIndex + 3] = 255
           }
         }
