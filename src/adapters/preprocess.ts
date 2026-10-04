@@ -84,12 +84,21 @@ export async function readImageChannels(
       for (let local = 0; local < data.length / 4; local++) {
         const i = start + local
         const offset = local * 4
-        rgb[i] = normalize ? data[offset] / 255 : data[offset]
-        rgb[pixels + i] = normalize ? data[offset + 1] / 255 : data[offset + 1]
-        rgb[pixels * 2 + i] = normalize
-          ? data[offset + 2] / 255
-          : data[offset + 2]
+        const red = data[offset]
+        const green = data[offset + 1]
+        const blue = data[offset + 2]
         const opacity = data[offset + 3]
+        if (
+          red === undefined ||
+          green === undefined ||
+          blue === undefined ||
+          opacity === undefined
+        ) {
+          throw new Error('Canvas returned incomplete pixel data')
+        }
+        rgb[i] = normalize ? red / 255 : red
+        rgb[pixels + i] = normalize ? green / 255 : green
+        rgb[pixels * 2 + i] = normalize ? blue / 255 : blue
         if (!alpha && opacity !== 255) {
           // Opaque images need no extra plane. Earlier pixels are known to be opaque.
           alpha = new Uint8Array(pixels)
@@ -100,7 +109,7 @@ export async function readImageChannels(
     },
     signal
   )
-  return { rgb, alpha }
+  return alpha ? { rgb, alpha } : { rgb }
 }
 
 export function readMask(image: PixelSource, signal?: AbortSignal) {
@@ -123,13 +132,14 @@ export async function readResizedMask(
     height,
     (data, start) => {
       for (let i = 0; i < data.length / 4; i++) {
+        const red = data[i * 4]
+        const green = data[i * 4 + 1]
+        const blue = data[i * 4 + 2]
+        if (red === undefined || green === undefined || blue === undefined) {
+          throw new Error('Canvas returned incomplete pixel data')
+        }
         // Match OpenCV's existing white-mask decision, including near-white pixels.
-        const gray =
-          (4899 * data[i * 4] +
-            9617 * data[i * 4 + 1] +
-            1868 * data[i * 4 + 2] +
-            8192) >>
-          14
+        const gray = (4899 * red + 9617 * green + 1868 * blue + 8192) >> 14
         output[start + i] = gray === 255 ? 0 : 255
       }
     },

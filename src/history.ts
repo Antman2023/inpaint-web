@@ -28,8 +28,9 @@ export function historyReducer<T>(
         entries.length > 1 &&
         (entries.length > HISTORY_MAX_STEPS || bytes > HISTORY_MAX_BYTES)
       ) {
-        bytes -= sizeOf(entries[0])
-        entries.shift()
+        bytes -= entries
+          .splice(0, 1)
+          .reduce((removedBytes, entry) => removedBytes + sizeOf(entry), 0)
         removed++
       }
       const next = { entries, index: entries.length - 1 }

@@ -6,13 +6,13 @@ export default class EditorBoundary extends Component<{
   children: ReactNode
   onReset: () => void
 }> {
-  state = { failed: false }
+  override state = { failed: false }
 
   static getDerivedStateFromError() {
     return { failed: true }
   }
 
-  render() {
+  override render() {
     if (!this.state.failed) return this.props.children
     return (
       <div className="flex h-full items-center justify-center overflow-y-auto p-6">

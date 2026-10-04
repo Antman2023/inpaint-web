@@ -1,47 +1,4 @@
-import { loadImage } from './utils'
-
-export function canvasToBlob(
-  canvas: HTMLCanvasElement,
-  signal?: AbortSignal
-): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    let settled = false
-    let timeout: ReturnType<typeof setTimeout> | undefined
-    const cleanup = () => {
-      settled = true
-      clearTimeout(timeout)
-      signal?.removeEventListener('abort', abort)
-    }
-    const fail = (error: unknown) => {
-      if (settled) return
-      cleanup()
-      reject(error)
-    }
-    const abort = () => fail(signal?.reason)
-    if (signal?.aborted) {
-      abort()
-      return
-    }
-    signal?.addEventListener('abort', abort, { once: true })
-    timeout = setTimeout(
-      () => fail(new Error('Image encoding timed out')),
-      30_000
-    )
-    try {
-      canvas.toBlob(blob => {
-        if (settled) return
-        if (!blob) {
-          fail(new Error('Unable to encode image'))
-          return
-        }
-        cleanup()
-        resolve(blob)
-      }, 'image/png')
-    } catch (error) {
-      fail(error)
-    }
-  })
-}
+import { canvasToBlob, loadImage } from './utils'
 
 export async function imageDataToBlob(data: ImageData, signal?: AbortSignal) {
   signal?.throwIfAborted()

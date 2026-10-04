@@ -3,81 +3,97 @@ import { message } from '../i18n'
 import localforage from 'localforage'
 
 export type modelType = 'inpaint' | 'superResolution'
+const MAX_MODEL_BYTES = 256 * 1024 * 1024
+const CACHE_TIMEOUT_MS = 30_000
+const MODELS: Record<
+  modelType,
+  { name: string; url: string; backupUrl: string }
+> = {
+  inpaint: {
+    name: 'migan-pipeline-v2',
+    url: 'https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
+    backupUrl:
+      'https://worker-share-proxy-01f5.lxfater.workers.dev/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
+  },
+  superResolution: {
+    name: 'realesrgan-x4',
+    url: 'https://huggingface.co/lxfater/inpaint-web/resolve/main/realesrgan-x4.onnx',
+    backupUrl:
+      'https://worker-share-proxy-01f5.lxfater.workers.dev/lxfater/inpaint-web/resolve/main/realesrgan-x4.onnx',
+  },
+}
 
 localforage.config({
   name: 'modelCache',
 })
 
-export async function saveModel(modelType: modelType, modelBlob: ArrayBuffer) {
-  await localforage.setItem(getModel(modelType).name, modelBlob)
-}
-
-function getModel(modelType: modelType) {
-  if (modelType === 'inpaint') {
-    const modelList = [
-      {
-        name: 'model',
-        url: 'https://huggingface.co/lxfater/inpaint-web/resolve/main/migan.onnx',
-        backupUrl: '',
-      },
-      {
-        name: 'model-perf',
-        url: 'https://huggingface.co/andraniksargsyan/migan/resolve/main/migan.onnx',
-        backupUrl: '',
-      },
-      {
-        name: 'migan-pipeline-v2',
-        url: 'https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
-        backupUrl:
-          'https://worker-share-proxy-01f5.lxfater.workers.dev/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
-      },
-    ]
-    const currentModel = modelList[2]
-    return currentModel
-  }
-  if (modelType === 'superResolution') {
-    const modelList = [
-      {
-        name: 'realesrgan-x4',
-        url: 'https://huggingface.co/lxfater/inpaint-web/resolve/main/realesrgan-x4.onnx',
-        backupUrl:
-          'https://worker-share-proxy-01f5.lxfater.workers.dev/lxfater/inpaint-web/resolve/main/realesrgan-x4.onnx',
-      },
-    ]
-    const currentModel = modelList[0]
-    return currentModel
-  }
-  throw new Error('wrong modelType')
-}
-
-export async function loadModel(
-  modelType: modelType
-): Promise<ArrayBuffer | null> {
+async function cacheOperation<T>(
+  operation: Promise<T>,
+  timeoutKey: Parameters<typeof message>[0]
+) {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const model = await Promise.race([
-      localforage.getItem<ArrayBuffer>(getModel(modelType).name),
+    return await Promise.race([
+      operation,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          reject(new Error(message('model_cache_read_timeout')))
-        }, 30_000)
+          reject(new Error(message(timeoutKey)))
+        }, CACHE_TIMEOUT_MS)
       }),
     ])
-    return model instanceof ArrayBuffer && model.byteLength > 0 ? model : null
   } finally {
     clearTimeout(timer)
   }
 }
 
+function readCache<T>(operation: Promise<T>) {
+  return cacheOperation(operation, 'model_cache_read_timeout')
+}
+
+function updateCache<T>(operation: Promise<T>) {
+  return cacheOperation(operation, 'model_cache_write_timeout')
+}
+
+export async function saveModel(modelType: modelType, modelBlob: ArrayBuffer) {
+  await updateCache(localforage.setItem(getModel(modelType).name, modelBlob))
+}
+
+function getModel(modelType: modelType) {
+  const model = MODELS[modelType]
+  if (!model) throw new Error('wrong modelType')
+  return model
+}
+
+export async function loadModel(
+  modelType: modelType
+): Promise<ArrayBuffer | null> {
+  const name = getModel(modelType).name
+  const model = await readCache(localforage.getItem<ArrayBuffer>(name))
+  if (model === null) return null
+  if (
+    !(model instanceof ArrayBuffer) ||
+    model.byteLength === 0 ||
+    model.byteLength > MAX_MODEL_BYTES
+  ) {
+    // Old deployments or interrupted storage writes may leave an unusable
+    // value. Remove it before falling back to a bounded network download.
+    await updateCache(localforage.removeItem(name))
+    return null
+  }
+  return model
+}
+
 export async function modelExists(modelType: modelType) {
-  const model = await loadModel(modelType)
-  return model instanceof ArrayBuffer && model.byteLength > 0
+  // Repair only needs to know whether a model was used on an earlier page.
+  // Listing keys avoids deserializing a potentially large model just to test it.
+  const keys = await readCache(localforage.keys())
+  return keys.includes(getModel(modelType).name)
 }
 
 export async function removeCachedModel(modelType: modelType) {
   // Let an earlier preload finish before removing its result.
   await pendingDownloads.get(modelType)?.promise.catch(() => {})
-  await localforage.removeItem(getModel(modelType).name)
+  await updateCache(localforage.removeItem(getModel(modelType).name))
 }
 
 export async function ensureModel(
@@ -191,8 +207,8 @@ async function downloadAndCacheModel(
       }
       const contentType = response.headers
         .get('content-type')
-        ?.split(';')[0]
-        .trim()
+        ?.split(';', 1)[0]
+        ?.trim()
         .toLowerCase()
       if (
         contentType === 'text/html' ||
@@ -214,6 +230,13 @@ async function downloadAndCacheModel(
         .get('content-encoding')
         ?.trim()
         .toLowerCase()
+      if (
+        (!encoding || encoding === 'identity') &&
+        Number.isSafeInteger(fullSize) &&
+        fullSize > MAX_MODEL_BYTES
+      ) {
+        throw new Error('Model download exceeds the 256 MB limit')
+      }
       // Fetch yields decoded bytes; Content-Length describes the encoded body.
       const hasByteProgress =
         (!encoding || encoding === 'identity') &&
@@ -234,6 +257,11 @@ async function downloadAndCacheModel(
         if (!value?.byteLength) continue
         lastActivity = performance.now()
         downloaded += value.byteLength
+        // Content-Length may be absent or dishonest. Bound decoded bytes too,
+        // before retaining the chunk or allocating the assembled model.
+        if (downloaded > MAX_MODEL_BYTES) {
+          throw new Error('Model download exceeds the 256 MB limit')
+        }
         total.push(value)
 
         if (hasByteProgress) {

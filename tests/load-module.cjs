@@ -7,14 +7,22 @@ function loadModule(path, dependencies = {}, globals = {}) {
   path = relative(resolve(__dirname, '..'), resolve(__dirname, '..', path))
   const source = readFileSync(resolve(__dirname, '..', path), 'utf8')
   const { outputText } = process.env.MEMORY_COMPILED_DIR
-    ? { outputText: readFileSync(resolve(process.env.MEMORY_COMPILED_DIR, path.replace(/\.ts$/, '.cjs')), 'utf8') }
+    ? {
+        outputText: readFileSync(
+          resolve(
+            process.env.MEMORY_COMPILED_DIR,
+            path.replace(/\.ts$/, '.cjs')
+          ),
+          'utf8'
+        ),
+      }
     : ts.transpileModule(source, {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-      esModuleInterop: true,
-    },
-  })
+        compilerOptions: {
+          module: ts.ModuleKind.CommonJS,
+          target: ts.ScriptTarget.ES2022,
+          esModuleInterop: true,
+        },
+      })
   const module = { exports: {} }
   new Function(
     'require',
@@ -26,11 +34,13 @@ function loadModule(path, dependencies = {}, globals = {}) {
     name => {
       if (name in dependencies) return dependencies[name]
       if (process.env.MEMORY_COMPILED_DIR && name.endsWith('.js')) {
-        return require(resolve(process.env.MEMORY_COMPILED_DIR, dirname(path), name))
+        return require(
+          resolve(process.env.MEMORY_COMPILED_DIR, dirname(path), name)
+        )
       }
       if (name.startsWith('.')) {
         const target = resolve(__dirname, '..', dirname(path), name)
-        return loadModule(target + '.ts', dependencies, globals)
+        return loadModule(`${target}.ts`, dependencies, globals)
       }
       return require(name)
     },

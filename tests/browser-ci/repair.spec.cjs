@@ -77,3 +77,89 @@ test('failed runtime repair retries both sources and restores its parent dialog'
   await expect(aboutButton).toBeFocused()
   expect(errors).toEqual([])
 })
+
+test('leaving the repair dialog suppresses late component updates', async ({
+  page,
+  baseURL,
+}) => {
+  const requests = []
+  const errors = []
+  const consoleErrors = []
+  page.on('pageerror', error => errors.push(error.message))
+  page.on('console', entry => {
+    if (entry.type() === 'error') consoleErrors.push(entry.text())
+  })
+  await page.addInitScript(() => localStorage.setItem('inpaint-language', 'en'))
+  await page.route('**/*', route => {
+    const url = new URL(route.request().url())
+    if (url.origin === baseURL) return route.continue()
+    if (url.pathname.endsWith('/ort.wasm.min.js')) {
+      requests.push(route)
+      return
+    }
+    return route.abort()
+  })
+  await page.goto('/')
+
+  const feedbackButton = page.getByRole('button', {
+    name: messages.feedback,
+    exact: true,
+  })
+  await feedbackButton.click()
+  const about = page.getByRole('dialog', {
+    name: messages.feedback,
+    exact: true,
+  })
+  await about
+    .getByRole('button', { name: messages.repair_runtime, exact: true })
+    .click()
+  await expect.poll(() => requests.length).toBe(1)
+
+  // The nested modal normally makes its parent inert. Invoke the parent's close
+  // control directly to cover application teardown, navigation and hot updates
+  // while a shared runtime repair is still settling.
+  await about
+    .getByRole('button', { name: messages.close, exact: true })
+    .evaluate(button => button.click())
+  await expect(about).toHaveCount(0)
+
+  for (let source = 0; source < 2; source++) {
+    await expect.poll(() => requests.length).toBe(source + 1)
+    await requests[source].fulfill({
+      status: 503,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: 'offline',
+    })
+  }
+
+  // A new repair request proves the abandoned operation has fully settled.
+  await feedbackButton.click()
+  const reopenedAbout = page.getByRole('dialog', {
+    name: messages.feedback,
+    exact: true,
+  })
+  await reopenedAbout
+    .getByRole('button', { name: messages.repair_runtime, exact: true })
+    .click()
+  const repair = page.getByRole('dialog', {
+    name: messages.repair_runtime,
+    exact: true,
+  })
+  for (let source = 0; source < 2; source++) {
+    const index = source + 2
+    await expect.poll(() => requests.length).toBe(index + 1)
+    await requests[index].fulfill({
+      status: 503,
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: 'offline',
+    })
+  }
+  await expect(repair.getByRole('status')).toHaveText(messages.repair_failed)
+
+  expect(
+    consoleErrors.filter(message =>
+      message.includes("Can't perform a React state update on an unmounted")
+    )
+  ).toEqual([])
+  expect(errors).toEqual([])
+})

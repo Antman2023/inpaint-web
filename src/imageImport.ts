@@ -1,13 +1,27 @@
-import { resizeImageFile } from './utils'
+import { normalizeImageType, resizeImageFile } from './utils'
 import { message } from './i18n'
 
 export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
+export function selectImageCandidate(files: Iterable<File>) {
+  const candidates = Array.from(files)
+  return (
+    candidates.find(file => IMAGE_TYPES.includes(file.type)) ??
+    candidates.find(
+      file => !file.type || file.type === 'application/octet-stream'
+    ) ??
+    candidates[0]
+  )
+}
+
 async function readExample(response: Response) {
   const type =
-    response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() ??
-    ''
+    response.headers
+      .get('content-type')
+      ?.split(';', 1)[0]
+      ?.trim()
+      .toLowerCase() ?? ''
   const length = response.headers.get('content-length')?.trim() ?? ''
   const encoding = response.headers
     .get('content-encoding')
@@ -106,11 +120,17 @@ export function createImageImporter(
           file = source
         }
         if (active !== request) return
-        if (!IMAGE_TYPES.includes(file.type)) {
-          throw new Error(message('invalid_file'))
-        }
         if (file.size > MAX_IMAGE_BYTES) {
           throw new Error(message('file_too_large'))
+        }
+        if (!IMAGE_TYPES.includes(file.type)) {
+          // OS and clipboard metadata can be empty or generic. Prefer the
+          // supported image signature before deciding whether to reject it.
+          file = await normalizeImageType(file, request.signal)
+          if (active !== request) return
+          if (!IMAGE_TYPES.includes(file.type)) {
+            throw new Error(message('invalid_file'))
+          }
         }
         const result = await resizeImageFile(file, 4096, request.signal)
         if (active === request) onChange({ status: 'ready', file: result.file })

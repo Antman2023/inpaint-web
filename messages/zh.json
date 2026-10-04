@@ -47,6 +47,7 @@
   "processing_model": "正在读取或下载模型…",
   "model_download_timeout": "连续 30 秒未收到模型数据，请检查网络后重试。",
   "model_cache_read_timeout": "读取模型缓存超时，请重试或刷新页面。",
+  "model_cache_write_timeout": "更新模型缓存超时，请重试或刷新页面。",
   "processing_prepare": "正在准备图片和涂抹区域…",
   "processing_inference": "正在修复图片，大图可能需要较长时间…",
   "processing_output": "正在生成结果图片…",

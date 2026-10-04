@@ -4,42 +4,58 @@ const { loadModule } = require('./load-module.cjs')
 
 test('inpainting releases RGB and mask inputs before asynchronous output conversion', async () => {
   let rgbRef, maskRef, finishOutput, reachedOutput
-  const paused = new Promise(resolve => { reachedOutput = resolve })
+  const paused = new Promise(resolve => {
+    reachedOutput = resolve
+  })
   class Tensor {
-    constructor(type, data, dims) { Object.assign(this, { type, data, dims }) }
+    constructor(type, data, dims) {
+      Object.assign(this, { type, data, dims })
+    }
   }
-  const adapter = loadModule('src/adapters/inpainting.ts', {
-    '../imageResources': {
-      withImage: async (image, _signal, task) => task(image),
-      imageDataToBlob: async result => result,
-    },
-    './preprocess': {
-      readImageChannels: async () => {
-        const rgb = new Uint8Array(3 * 64 * 64)
-        rgbRef = new WeakRef(rgb)
-        return { rgb }
+  const adapter = loadModule(
+    'src/adapters/inpainting.ts',
+    {
+      '../imageResources': {
+        withImage: async (image, _signal, task) => task(image),
+        imageDataToBlob: async result => result,
       },
-      readResizedMask: async () => {
-        const mask = new Uint8Array(64 * 64)
-        maskRef = new WeakRef(mask)
-        return mask
+      './preprocess': {
+        readImageChannels: async () => {
+          const rgb = new Uint8Array(3 * 64 * 64)
+          rgbRef = new WeakRef(rgb)
+          return { rgb }
+        },
+        readResizedMask: async () => {
+          const mask = new Uint8Array(64 * 64)
+          maskRef = new WeakRef(mask)
+          return mask
+        },
+      },
+      './runtime': {
+        withRuntime: task => task(),
+        getSession: async () => ({
+          inputNames: ['image', 'mask'],
+          outputNames: ['output'],
+          run: async () => ({
+            output: {
+              data: new Uint8Array(3 * 64 * 64).fill(23),
+              dims: [1, 3, 64, 64],
+            },
+          }),
+        }),
+      },
+      './postprocess': {
+        planarToImageData: async data => {
+          reachedOutput()
+          await new Promise(resolve => {
+            finishOutput = resolve
+          })
+          return data
+        },
       },
     },
-    './runtime': {
-      withRuntime: task => task(),
-      getSession: async () => ({
-        inputNames: ['image', 'mask'], outputNames: ['output'],
-        run: async () => ({ output: {
-          data: new Uint8Array(3 * 64 * 64).fill(23), dims: [1, 3, 64, 64],
-        } }),
-      }),
-    },
-    './postprocess': { planarToImageData: async data => {
-      reachedOutput()
-      await new Promise(resolve => { finishOutput = resolve })
-      return data
-    } },
-  }, { ort: { Tensor } })
+    { ort: { Tensor } }
+  )
   const operation = adapter.default({ naturalWidth: 64, naturalHeight: 64 }, {})
   await paused
   try {
@@ -47,8 +63,16 @@ test('inpainting releases RGB and mask inputs before asynchronous output convers
       await new Promise(setImmediate)
       global.gc()
     }
-    assert.equal(rgbRef.deref() === undefined, true, 'Inpaint RGB input remains retained')
-    assert.equal(maskRef.deref() === undefined, true, 'Inpaint mask input remains retained')
+    assert.equal(
+      rgbRef.deref() === undefined,
+      true,
+      'Inpaint RGB input remains retained'
+    )
+    assert.equal(
+      maskRef.deref() === undefined,
+      true,
+      'Inpaint mask input remains retained'
+    )
   } finally {
     finishOutput()
     const result = await operation
@@ -60,41 +84,65 @@ test('inpainting releases RGB and mask inputs before asynchronous output convers
 test('upscale releases RGB input before asynchronous alpha processing', async () => {
   class Image {}
   class Tensor {
-    constructor(type, data, dims) { Object.assign(this, { type, data, dims }) }
+    constructor(type, data, dims) {
+      Object.assign(this, { type, data, dims })
+    }
   }
   let rgbRef, finishAlpha, reachedAlpha
-  const paused = new Promise(resolve => { reachedAlpha = resolve })
-  const adapter = loadModule('src/adapters/superResolution.ts', {
-    '../imageResources': {
-      withImage: async (image, _signal, task) => task(image),
-      imageDataToBlob: async result => result,
-    },
-    './preprocess': { readImageChannels: async () => {
-      const rgb = new Float32Array(3 * 64 * 64)
-      rgbRef = new WeakRef(rgb)
-      return { rgb, alpha: new Uint8Array(64 * 64) }
-    } },
-    './alpha': { applyResizedAlpha: async () => {
-      reachedAlpha()
-      await new Promise(resolve => { finishAlpha = resolve })
-    } },
-    './runtime': {
-      withRuntime: task => task(),
-      getSession: async () => ({
-        inputNames: ['input'], outputNames: ['output'],
-        run: async () => ({ output: {
-          data: new Float32Array(3 * 256 * 256), dims: [1, 3, 256, 256],
-        } }),
-      }),
-    },
-    '../i18n': { message: key => key },
-  }, {
-    ort: { Tensor }, HTMLImageElement: Image,
-    ImageData: class {
-      constructor(data, width, height) { Object.assign(this, { data, width, height }) }
-    },
+  const paused = new Promise(resolve => {
+    reachedAlpha = resolve
   })
-  const image = Object.assign(new Image(), { naturalWidth: 64, naturalHeight: 64 })
+  const adapter = loadModule(
+    'src/adapters/superResolution.ts',
+    {
+      '../imageResources': {
+        withImage: async (image, _signal, task) => task(image),
+        imageDataToBlob: async result => result,
+      },
+      './preprocess': {
+        readImageChannels: async () => {
+          const rgb = new Float32Array(3 * 64 * 64)
+          rgbRef = new WeakRef(rgb)
+          return { rgb, alpha: new Uint8Array(64 * 64) }
+        },
+      },
+      './alpha': {
+        applyResizedAlpha: async () => {
+          reachedAlpha()
+          await new Promise(resolve => {
+            finishAlpha = resolve
+          })
+        },
+      },
+      './runtime': {
+        withRuntime: task => task(),
+        getSession: async () => ({
+          inputNames: ['input'],
+          outputNames: ['output'],
+          run: async () => ({
+            output: {
+              data: new Float32Array(3 * 256 * 256),
+              dims: [1, 3, 256, 256],
+            },
+          }),
+        }),
+      },
+      '../i18n': { message: key => key },
+    },
+    {
+      ort: { Tensor },
+      HTMLImageElement: Image,
+      ImageData: class {
+        constructor(data, width, height) {
+          Object.assign(this, { data, width, height })
+        }
+      },
+    }
+  )
+  const image = Object.assign(new Image(), {
+    naturalWidth: 64,
+    naturalHeight: 64,
+  })
   const operation = adapter.default(image, () => {})
   await paused
   try {
@@ -102,7 +150,11 @@ test('upscale releases RGB input before asynchronous alpha processing', async ()
       await new Promise(setImmediate)
       global.gc()
     }
-    assert.equal(rgbRef.deref() === undefined, true, 'RGB input retained after all tiles finished')
+    assert.equal(
+      rgbRef.deref() === undefined,
+      true,
+      'RGB input retained after all tiles finished'
+    )
   } finally {
     finishAlpha()
     assert.equal((await operation).width, 256)
@@ -111,23 +163,42 @@ test('upscale releases RGB input before asynchronous alpha processing', async ()
 
 test('completed upscale tile output can be collected while the next inference waits', async () => {
   let outputRef, finish, reachedSecond
-  const paused = new Promise(resolve => { reachedSecond = resolve })
+  const paused = new Promise(resolve => {
+    reachedSecond = resolve
+  })
   class Tensor {
-    constructor(type, data, dims) { Object.assign(this, { type, data, dims }) }
+    constructor(type, data, dims) {
+      Object.assign(this, { type, data, dims })
+    }
   }
-  const adapter = loadModule('src/adapters/superResolution.ts', {
-    '../imageResources': {}, './preprocess': {}, './alpha': {}, './runtime': {},
-    '../i18n': { message: key => key },
-  }, {
-    ort: { Tensor },
-    ImageData: class {
-      constructor(data, width, height) { Object.assign(this, { data, width, height }) }
+  const adapter = loadModule(
+    'src/adapters/superResolution.ts',
+    {
+      '../imageResources': {},
+      './preprocess': {},
+      './alpha': {},
+      './runtime': {},
+      '../i18n': { message: key => key },
+    },
+    {
+      ort: { Tensor },
+      ImageData: class {
+        constructor(data, width, height) {
+          Object.assign(this, { data, width, height })
+        }
+      },
+    }
+  )
+  let runs = 0
+  const output = () => ({
+    output: {
+      data: new Float32Array(3 * 256 * 256).fill(0.5),
+      dims: [1, 3, 256, 256],
     },
   })
-  let runs = 0
-  const output = () => ({ output: { data: new Float32Array(3 * 256 * 256).fill(0.5), dims: [1, 3, 256, 256] } })
   const session = {
-    inputNames: ['input'], outputNames: ['output'],
+    inputNames: ['input'],
+    outputNames: ['output'],
     async run() {
       if (++runs === 1) {
         const result = output()
@@ -135,17 +206,27 @@ test('completed upscale tile output can be collected while the next inference wa
         return result
       }
       reachedSecond()
-      return new Promise(resolve => { finish = () => resolve(output()) })
+      return new Promise(resolve => {
+        finish = () => resolve(output())
+      })
     },
   }
-  const operation = adapter.tileProc(new Tensor('float32', new Float32Array(3 * 53), [1, 3, 1, 53]), session, () => {})
+  const operation = adapter.tileProc(
+    new Tensor('float32', new Float32Array(3 * 53), [1, 3, 1, 53]),
+    session,
+    () => {}
+  )
   await paused
   try {
     for (let i = 0; i < 5; i++) {
       await new Promise(setImmediate)
       global.gc()
     }
-    assert.equal(outputRef.deref() === undefined, true, 'Previous tile output remains retained')
+    assert.equal(
+      outputRef.deref() === undefined,
+      true,
+      'Previous tile output remains retained'
+    )
   } finally {
     finish()
     const result = await operation
@@ -158,7 +239,9 @@ test('completed upscale tile output can be collected while the next inference wa
 test('cancelled shared waiters release their abort reason before shared work finishes', async () => {
   const { waitForAbort } = loadModule('src/cancellation.ts')
   let finish
-  const shared = new Promise(resolve => { finish = resolve })
+  const shared = new Promise(resolve => {
+    finish = resolve
+  })
   async function cancelWaiter() {
     const controller = new AbortController()
     const reason = new Uint8Array(16 * 1024 * 1024)
@@ -175,8 +258,11 @@ test('cancelled shared waiters release their abort reason before shared work fin
       await new Promise(setImmediate)
       global.gc()
     }
-    assert.equal(cancelledReason.deref() === undefined, true,
-      'Cancelled shared waiter retains its abort reason')
+    assert.equal(
+      cancelledReason.deref() === undefined,
+      true,
+      'Cancelled shared waiter retains its abort reason'
+    )
   } finally {
     finish(42)
     assert.equal(await survivor, 42)

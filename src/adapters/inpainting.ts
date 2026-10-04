@@ -22,22 +22,20 @@ async function inpaintPixels(
   onStage?: (stage: InpaintStage) => void,
   signal?: AbortSignal
 ) {
+  const imageInputName = session.inputNames[0]
+  const maskInputName = session.inputNames[1]
+  const outputName = session.outputNames[0]
+  if (!imageInputName || !maskInputName || !outputName) {
+    throw new Error(
+      'Inpainting model is missing required input or output names'
+    )
+  }
   const { naturalWidth: width, naturalHeight: height } = image
   const { rgb, alpha } = await readImageChannels(image, false, signal)
   const selection = await readResizedMask(mask, width, height, signal)
   const feed = {
-    [session.inputNames[0]]: new ort.Tensor('uint8', rgb, [
-      1,
-      3,
-      height,
-      width,
-    ]),
-    [session.inputNames[1]]: new ort.Tensor('uint8', selection, [
-      1,
-      1,
-      height,
-      width,
-    ]),
+    [imageInputName]: new ort.Tensor('uint8', rgb, [1, 3, height, width]),
+    [maskInputName]: new ort.Tensor('uint8', selection, [1, 1, height, width]),
   }
   onStage?.('processing_inference')
   // Give the browser a chance to paint status and deliver cancellation.
@@ -45,7 +43,7 @@ async function inpaintPixels(
   signal?.throwIfAborted()
   const results = await session.run(feed)
   // Drop RGB and mask inputs before the asynchronous output conversion.
-  return { output: results[session.outputNames[0]], alpha }
+  return { output: results[outputName], alpha }
 }
 
 export default function run(

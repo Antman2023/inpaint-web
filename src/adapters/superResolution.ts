@@ -31,6 +31,8 @@ export async function tileProc(
     inputDims.length !== 4 ||
     inputDims[0] !== 1 ||
     inputDims[1] !== 3 ||
+    imageW === undefined ||
+    imageH === undefined ||
     !Number.isInteger(imageW) ||
     !Number.isInteger(imageH) ||
     imageW < 1 ||
@@ -44,6 +46,13 @@ export async function tileProc(
   }
   if (data.length !== imageW * imageH * 3) {
     throw new Error('Input tensor data length does not match its shape')
+  }
+  const inputName = session.inputNames[0]
+  const outputName = session.outputNames[0]
+  if (!inputName || !outputName) {
+    throw new Error(
+      'Upscaling model is missing a required input or output name'
+    )
   }
   const plan = getUpscalePlan(imageW, imageH)
   if (!plan.ok) throw new Error(message(plan.reason))
@@ -60,8 +69,8 @@ export async function tileProc(
   const tilePadding = 6
   const tileSizePre = tileSize - tilePadding * 2
 
-  const tilesx = Math.ceil(inputDims[3] / tileSizePre)
-  const tilesy = Math.ceil(inputDims[2] / tileSizePre)
+  const tilesx = Math.ceil(imageW / tileSizePre)
+  const tilesy = Math.ceil(imageH / tileSizePre)
 
   const numTiles = tilesx * tilesy
   let currentTile = 0
@@ -74,6 +83,9 @@ export async function tileProc(
       // WASM inference can occupy the main thread. Paint status before each tile.
       await new Promise(resolve => setTimeout(resolve, 16))
       signal?.throwIfAborted()
+      if (data.length !== imageW * imageH * 3) {
+        throw new Error('Input tensor data became unavailable during upscaling')
+      }
       const tileW = Math.min(tileSizePre, imageW - i * tileSizePre)
       const tileH = Math.min(tileSizePre, imageH - j * tileSizePre)
       const tileROffset = 0
@@ -94,9 +106,15 @@ export async function tileProc(
           const xim = Math.max(0, Math.min(imageW - 1, sourceLeft + xt))
           const idx = sourceRow + xim
           const target = targetRow + xt
-          tileData[target + tileROffset] = data[idx + rOffset]
-          tileData[target + tileGOffset] = data[idx + gOffset]
-          tileData[target + tileBOffset] = data[idx + bOffset]
+          const red = data[idx + rOffset]
+          const green = data[idx + gOffset]
+          const blue = data[idx + bOffset]
+          if (red === undefined || green === undefined || blue === undefined) {
+            throw new Error('Input tensor data is incomplete')
+          }
+          tileData[target + tileROffset] = red
+          tileData[target + tileGOffset] = green
+          tileData[target + tileBOffset] = blue
         }
       }
 
@@ -108,10 +126,10 @@ export async function tileProc(
       ])
       // Consume the output in a separate callback so the async loop does not
       // retain the previous tile's tensor while awaiting the next inference.
-      await session.run({ [session.inputNames[0]]: tile }).then(r => {
+      await session.run({ [inputName]: tile }).then(r => {
         signal?.throwIfAborted()
         const results = {
-          output: r[session.outputNames[0]],
+          output: r[outputName],
         }
         if (!(results.output?.data instanceof Float32Array)) {
           throw new TypeError('Expected a float32 output tensor')
@@ -149,6 +167,9 @@ export async function tileProc(
             // Typed-array conversion silently turns NaN/Infinity into black or
             // white. Reject unusable pixels before committing an edited image.
             if (
+              red === undefined ||
+              green === undefined ||
+              blue === undefined ||
               !Number.isFinite(red) ||
               !Number.isFinite(green) ||
               !Number.isFinite(blue)

@@ -43,13 +43,13 @@ export async function runBrowserWorkflow({ verifyCleanup = false } = {}) {
   const createURL = URL.createObjectURL
   const revokeURL = URL.revokeObjectURL
   if (verifyCleanup) {
-    URL.createObjectURL = function (blob) {
+    URL.createObjectURL = blob => {
       const url = createURL.call(URL, blob)
       activeURLs.add(url)
       createdURLs++
       return url
     }
-    URL.revokeObjectURL = function (url) {
+    URL.revokeObjectURL = url => {
       activeURLs.delete(url)
       return revokeURL.call(URL, url)
     }

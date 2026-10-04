@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { waitForAbort } from './cancellation'
 
-async function normalizeImageType(file: File, signal?: AbortSignal) {
+export async function normalizeImageType(file: File, signal?: AbortSignal) {
   // File.type comes from metadata, often the extension rather than the bytes.
-  // Decode validation is still performed by the browser before this check.
+  // Only supported signatures are corrected; decoding still validates content.
   if (file.size < 12) return file
   const header = new Uint8Array(
     await waitForAbort(file.slice(0, 12).arrayBuffer(), signal)
@@ -65,6 +65,50 @@ function abortReason(signal?: AbortSignal) {
   return (
     signal?.reason ?? new DOMException('Image loading cancelled', 'AbortError')
   )
+}
+
+export function canvasToBlob(
+  canvas: HTMLCanvasElement,
+  signal?: AbortSignal,
+  type = 'image/png'
+) {
+  return new Promise<Blob>((resolve, reject) => {
+    let settled = false
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const cleanup = () => {
+      settled = true
+      clearTimeout(timeout)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const fail = (error: unknown) => {
+      if (settled) return
+      cleanup()
+      reject(error)
+    }
+    const onAbort = () => fail(abortReason(signal))
+    if (signal?.aborted) {
+      onAbort()
+      return
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    timeout = setTimeout(
+      () => fail(new Error('Image encoding timed out')),
+      30_000
+    )
+    try {
+      canvas.toBlob(result => {
+        if (settled) return
+        if (!result) {
+          fail(new Error('Unable to encode image'))
+          return
+        }
+        cleanup()
+        resolve(result)
+      }, type)
+    } catch (error) {
+      fail(error)
+    }
+  })
 }
 
 export function loadImage(
@@ -191,6 +235,8 @@ export async function resizeImageFile(
   if (!Number.isFinite(maxSize) || maxSize < 1) {
     throw new Error('Invalid maximum image size')
   }
+  file = await normalizeImageType(file, signal)
+  if (signal?.aborted) throw abortReason(signal)
   if (!file.type.startsWith('image/')) {
     throw new Error('Not an image')
   }
@@ -202,8 +248,6 @@ export async function resizeImageFile(
     if (signal?.aborted) throw abortReason(signal)
     const { naturalWidth: width, naturalHeight: height } = image
     if (!width || !height) throw new Error('Image has invalid dimensions')
-    file = await normalizeImageType(file, signal)
-    if (signal?.aborted) throw abortReason(signal)
     const scale = Math.min(1, maxSize / Math.max(width, height))
     if (scale === 1) {
       return { file, resized: false }
@@ -221,30 +265,7 @@ export async function resizeImageFile(
       file.type === 'image/png' || file.type === 'image/webp'
         ? file.type
         : 'image/jpeg'
-    const resizeCanvas = canvas
-    const blob = await new Promise<Blob>((resolve, reject) => {
-      const cleanup = () => signal?.removeEventListener('abort', onAbort)
-      const onAbort = () => {
-        cleanup()
-        reject(abortReason(signal))
-      }
-      if (signal?.aborted) {
-        onAbort()
-        return
-      }
-      signal?.addEventListener('abort', onAbort, { once: true })
-      try {
-        resizeCanvas.toBlob(result => {
-          cleanup()
-          if (signal?.aborted) reject(abortReason(signal))
-          else if (result) resolve(result)
-          else reject(new Error('Unable to encode image'))
-        }, outputType)
-      } catch (error) {
-        cleanup()
-        reject(error)
-      }
-    })
+    const blob = await canvasToBlob(canvas, signal, outputType)
     if (signal?.aborted) throw abortReason(signal)
     const f = new File([blob], imageFileName(file.name, blob.type), {
       type: blob.type,

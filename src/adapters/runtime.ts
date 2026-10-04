@@ -41,7 +41,7 @@ let initializing = 0
 let repairing: Promise<void> | undefined
 let needsRepair = false
 
-function runtimeAccessError() {
+function runtimeAccessError(): Error | undefined {
   if (repairing)
     return new Error(
       '环境正在修复，请完成后重试。 / Runtime repair in progress.'
@@ -50,6 +50,7 @@ function runtimeAccessError() {
     return new Error(
       '运行环境修复未完成，请重试修复。 / Runtime repair is incomplete. Retry repair.'
     )
+  return undefined
 }
 
 export function withRuntime<T>(
@@ -62,7 +63,7 @@ export function withRuntime<T>(
 }
 
 async function queueRuntimeOperation<T>(
-  work: { run?: () => Promise<T> },
+  work: { run: (() => Promise<T>) | undefined },
   signal?: AbortSignal
 ): Promise<T> {
   signal?.throwIfAborted()

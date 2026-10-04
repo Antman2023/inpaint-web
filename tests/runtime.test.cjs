@@ -182,7 +182,10 @@ function importHarness({ fetch, resize = async file => ({ file }) } = {}) {
   const { createImageImporter } = loadModule(
     'src/imageImport.ts',
     {
-      './utils': { resizeImageFile: resize },
+      './utils': {
+        normalizeImageType: async file => file,
+        resizeImageFile: resize,
+      },
       './i18n': { message: key => key },
     },
     {
@@ -200,6 +203,25 @@ function importHarness({ fetch, resize = async file => ({ file }) } = {}) {
     timers,
   }
 }
+
+test('image candidates prefer supported and sniffable files consistently', () => {
+  const { selectImageCandidate } = loadModule('src/imageImport.ts', {
+    './utils': {},
+    './i18n': { message: key => key },
+  })
+  const invalid = new File(['text'], 'notes.txt', { type: 'text/plain' })
+  const generic = new File(['png'], 'image.bin', {
+    type: 'application/octet-stream',
+  })
+  const unspecified = new File(['png'], 'image', { type: '' })
+  const supported = new File(['png'], 'image.png', { type: 'image/png' })
+
+  assert.equal(selectImageCandidate([invalid, generic]), generic)
+  assert.equal(selectImageCandidate([invalid, unspecified]), unspecified)
+  assert.equal(selectImageCandidate([generic, supported]), supported)
+  assert.equal(selectImageCandidate([invalid]), invalid)
+  assert.equal(selectImageCandidate([]), undefined)
+})
 
 test('a late example response cannot replace a newer uploaded image', async () => {
   let finish, signal
@@ -231,8 +253,10 @@ test('late image decoding cannot overwrite the new selection or its timeout', as
     resize: file => new Promise(resolve => pending.set(file.name, resolve)),
   })
   const old = importer.load(new File(['old'], 'old.png', { type: 'image/png' }))
+  await new Promise(resolve => setImmediate(resolve))
   const file = new File(['new'], 'new.png', { type: 'image/png' })
   const next = importer.load(file)
+  await new Promise(resolve => setImmediate(resolve))
   pending.get('old.png')({ file: new File(['old'], 'old.png') })
   await old
   assert.equal(states.at(-1).status, 'loading')
@@ -407,9 +431,10 @@ test('encoded and malformed example lengths defer to the actual streamed size', 
     { 'content-length': '10485761.5' },
   ]) {
     const { importer, states } = importHarness({
-      fetch: async () => new Response('decoded bytes', {
-        headers: { 'content-type': 'image/png', ...headers },
-      }),
+      fetch: async () =>
+        new Response('decoded bytes', {
+          headers: { 'content-type': 'image/png', ...headers },
+        }),
     })
     await importer.load('/example.png')
     assert.equal(states.at(-1).status, 'ready')
@@ -420,15 +445,26 @@ test('encoded and malformed example lengths defer to the actual streamed size', 
 test('underreported and compressed example lengths cannot bypass the stream limit', async () => {
   for (const encoding of [undefined, 'gzip']) {
     let cancelled = false
-    const body = new ReadableStream({
-      pull(controller) { controller.enqueue(new Uint8Array(10 * 1024 * 1024 + 1)) },
-      cancel() { cancelled = true },
-    }, { highWaterMark: 0 })
+    const body = new ReadableStream(
+      {
+        pull(controller) {
+          controller.enqueue(new Uint8Array(10 * 1024 * 1024 + 1))
+        },
+        cancel() {
+          cancelled = true
+        },
+      },
+      { highWaterMark: 0 }
+    )
     const { importer, states } = importHarness({
-      fetch: async () => new Response(body, { headers: {
-        'content-type': 'image/png', 'content-length': '1',
-        ...(encoding ? { 'content-encoding': encoding } : {}),
-      } }),
+      fetch: async () =>
+        new Response(body, {
+          headers: {
+            'content-type': 'image/png',
+            'content-length': '1',
+            ...(encoding ? { 'content-encoding': encoding } : {}),
+          },
+        }),
     })
     await importer.load('/example.png')
     assert.equal(states.at(-1).error, 'file_too_large')
@@ -442,7 +478,10 @@ test('example streams accept the exact size limit and parse the image MIME', asy
   const { importer, states } = importHarness({
     fetch: async () =>
       new Response(new Uint8Array(10 * 1024 * 1024), {
-        headers: { 'content-type': 'image/png; charset=binary', 'content-length': '10485760' },
+        headers: {
+          'content-type': 'image/png; charset=binary',
+          'content-length': '10485760',
+        },
       }),
     resize: async file => {
       received = file
@@ -473,8 +512,20 @@ test('broken example streams release the reader and allow a subsequent import', 
 })
 
 for (const { status, headers, error } of [
-  { status: 200, headers: { 'content-type': 'image/png', 'content-length': '10485761' }, error: 'file_too_large' },
-  { status: 200, headers: { 'content-type': 'image/png', 'content-length': '10485761', 'content-encoding': ' Identity ' }, error: 'file_too_large' },
+  {
+    status: 200,
+    headers: { 'content-type': 'image/png', 'content-length': '10485761' },
+    error: 'file_too_large',
+  },
+  {
+    status: 200,
+    headers: {
+      'content-type': 'image/png',
+      'content-length': '10485761',
+      'content-encoding': ' Identity ',
+    },
+    error: 'file_too_large',
+  },
   { status: 404, headers: {}, error: 'example_load_failed (404)' },
   {
     status: 200,
@@ -559,6 +610,12 @@ function cacheHarness(fetch, globals = {}, storage = {}) {
         async setItem(key, value) {
           stored.set(key, value)
         },
+        async removeItem(key) {
+          stored.delete(key)
+        },
+        async keys() {
+          return [...stored.keys()]
+        },
         ...storage,
       },
     },
@@ -566,6 +623,55 @@ function cacheHarness(fetch, globals = {}, storage = {}) {
   )
   return { cache, stored }
 }
+
+test('invalid and oversized cached models are removed before reuse', async () => {
+  class FakeArrayBuffer {
+    constructor(byteLength) {
+      this.byteLength = byteLength
+    }
+  }
+  for (const cached of [
+    {},
+    new FakeArrayBuffer(0),
+    new FakeArrayBuffer(256 * 1024 * 1024 + 1),
+  ]) {
+    const removed = []
+    const { cache } = cacheHarness(
+      async () => assert.fail('loadModel should not fetch'),
+      { ArrayBuffer: FakeArrayBuffer },
+      {
+        async getItem() {
+          return cached
+        },
+        async removeItem(key) {
+          removed.push(key)
+        },
+      }
+    )
+    assert.equal(await cache.loadModel('inpaint'), null)
+    assert.deepEqual(removed, ['migan-pipeline-v2'])
+  }
+})
+
+test('model existence checks list cache keys without loading model bytes', async () => {
+  let reads = 0
+  const { cache } = cacheHarness(
+    async () => assert.fail('modelExists should not fetch'),
+    {},
+    {
+      async getItem() {
+        reads++
+        return new ArrayBuffer(70 * 1024 * 1024)
+      },
+      async keys() {
+        return ['unrelated', 'realesrgan-x4']
+      },
+    }
+  )
+  assert.equal(await cache.modelExists('superResolution'), true)
+  assert.equal(await cache.modelExists('inpaint'), false)
+  assert.equal(reads, 0)
+})
 
 test('stalled cache reads release shared downloads and ignore late results after retry', async () => {
   const timers = new Map()
@@ -587,7 +693,9 @@ test('stalled cache reads release shared downloads and ignore late results after
       getItem() {
         reads++
         return reads === 1
-          ? new Promise(resolve => { finishRead = resolve })
+          ? new Promise(resolve => {
+              finishRead = resolve
+            })
           : Promise.resolve(expected)
       },
     }
@@ -610,6 +718,90 @@ test('stalled cache reads release shared downloads and ignore late results after
   assert.deepEqual(firstProgress, [null])
   assert.equal(await cache.ensureModel('inpaint'), expected)
   assert.equal(timers.size, 0)
+})
+
+test('stalled cache updates time out, settle independently and permit retry', async () => {
+  const timers = new Map()
+  let timerId = 0
+  let stallWrite = true
+  let stallRemoval = true
+  let finishWrite
+  let finishRemoval
+  const { cache, stored } = cacheHarness(
+    async () => assert.fail('direct cache operations should not fetch'),
+    {
+      setTimeout(callback, delay) {
+        assert.equal(delay, 30_000)
+        timers.set(++timerId, callback)
+        return timerId
+      },
+      clearTimeout: id => timers.delete(id),
+    },
+    {
+      setItem(key, value) {
+        if (!stallWrite) {
+          stored.set(key, value)
+          return Promise.resolve(value)
+        }
+        return new Promise(resolve => {
+          finishWrite = () => {
+            stored.set(key, value)
+            resolve(value)
+          }
+        })
+      },
+      removeItem(key) {
+        if (!stallRemoval) {
+          stored.delete(key)
+          return Promise.resolve()
+        }
+        return new Promise(resolve => {
+          finishRemoval = () => {
+            stored.delete(key)
+            resolve()
+          }
+        })
+      },
+    }
+  )
+
+  const first = new Uint8Array([1]).buffer
+  const write = assert.rejects(
+    cache.saveModel('inpaint', first),
+    /model_cache_write_timeout/
+  )
+  await new Promise(setImmediate)
+  assert.equal(timers.size, 1)
+  timers.values().next().value()
+  await write
+  assert.equal(timers.size, 0)
+  finishWrite()
+  await new Promise(setImmediate)
+  assert.equal(stored.get('migan-pipeline-v2'), first)
+  assert.equal(timers.size, 0)
+
+  stallWrite = false
+  const replacement = new Uint8Array([2]).buffer
+  await cache.saveModel('inpaint', replacement)
+  assert.equal(stored.get('migan-pipeline-v2'), replacement)
+
+  const removal = assert.rejects(
+    cache.removeCachedModel('inpaint'),
+    /model_cache_write_timeout/
+  )
+  await new Promise(setImmediate)
+  assert.equal(timers.size, 1)
+  timers.values().next().value()
+  await removal
+  assert.equal(timers.size, 0)
+  finishRemoval()
+  await new Promise(setImmediate)
+  assert.equal(stored.has('migan-pipeline-v2'), false)
+  assert.equal(timers.size, 0)
+
+  stallRemoval = false
+  await cache.removeCachedModel('inpaint')
+  assert.equal(stored.has('migan-pipeline-v2'), false)
 })
 
 test('large model assembly yields across chunk boundaries and lets a waiter cancel', async () => {
@@ -832,7 +1024,7 @@ test('session model progress is replayed to new waiters and detaches on cancella
 test('small download chunks notify only when the displayed tenth-percent changes', async () => {
   const progress = []
   let chunks = 0,
-    timersCreated = 0
+    timerDelays = []
   const { cache } = cacheHarness(
     async () =>
       new Response(
@@ -846,7 +1038,7 @@ test('small download chunks notify only when the displayed tenth-percent changes
       ),
     {
       setTimeout(...args) {
-        timersCreated++
+        timerDelays.push(args[1])
         return setTimeout(...args)
       },
     }
@@ -858,7 +1050,8 @@ test('small download chunks notify only when the displayed tenth-percent changes
   )
   assert.equal(progress[0], null)
   assert.equal(progress[1], null) // Cache lookup transitions to network download.
-  assert.equal(timersCreated, 2) // One cache-read timer and one download timer.
+  assert.deepEqual(timerDelays, [30_000, 30_000, 30_000])
+  // Cache read, network inactivity and cache write each own one deadline.
   assert.equal(progress.at(-1), 100)
   assert.ok(progress.includes(99))
   for (let i = 2; i < progress.length; i++) {
@@ -1023,6 +1216,71 @@ test('binary models accept missing or generic MIME types and compressed transfer
     await cache.downloadModel('inpaint', () => {})
     assert.equal((await cache.loadModel('inpaint')).byteLength, 3)
   }
+})
+
+test('oversized declared model responses fall back before reading their bodies', async () => {
+  let requests = 0
+  let reads = 0
+  let cancelled = false
+  const body = new ReadableStream(
+    {
+      pull(controller) {
+        reads++
+        controller.enqueue(new Uint8Array([9]))
+      },
+      cancel() {
+        cancelled = true
+      },
+    },
+    { highWaterMark: 0 }
+  )
+  const { cache, stored } = cacheHarness(async () => {
+    if (++requests === 1)
+      return new Response(body, {
+        headers: { 'content-length': String(256 * 1024 * 1024 + 1) },
+      })
+    return new Response(new Uint8Array([1, 2, 3]))
+  })
+  await cache.downloadModel('inpaint', () => {})
+  assert.equal(requests, 2)
+  assert.equal(reads, 0)
+  assert.equal(cancelled, true)
+  assert.equal(body.locked, false)
+  assert.deepEqual(
+    Array.from(new Uint8Array([...stored.values()][0])),
+    [1, 2, 3]
+  )
+})
+
+test('streamed model bytes cannot exceed the limit when length is unavailable', async () => {
+  let requests = 0
+  let cancelled = false
+  let released = false
+  const oversized = { byteLength: 256 * 1024 * 1024 + 1 }
+  const { cache, stored } = cacheHarness(async () => {
+    if (++requests > 1) return new Response(new Uint8Array([7]))
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          read: async () => ({ done: false, value: oversized }),
+          cancel: async () => {
+            cancelled = true
+          },
+          releaseLock: () => {
+            released = true
+          },
+        }),
+      },
+    }
+  })
+  await cache.downloadModel('inpaint', () => {})
+  assert.equal(requests, 2)
+  assert.equal(cancelled, true)
+  assert.equal(released, true)
+  assert.deepEqual(Array.from(new Uint8Array([...stored.values()][0])), [7])
 })
 
 test('compressed model responses stay indeterminate until decoded bytes are cached', async () => {
@@ -1274,6 +1532,7 @@ function imageHarness({
   decodePending = false,
   encodePending = false,
   encodeThrows = false,
+  clock,
 } = {}) {
   let revoked = 0
   const images = [],
@@ -1319,6 +1578,7 @@ function imageHarness({
         revokeObjectURL: () => revoked++,
       },
       document: { createElement: () => canvas },
+      ...clock,
     }
   )
   return {
@@ -1345,15 +1605,29 @@ test('very narrow images retain a nonzero dimension and release their object URL
   assert.equal(revoked(), 1)
 })
 
-test('image headers correct mislabeled formats without re-encoding small files', async () => {
-  for (const [header, type, name] of [
-    [[137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0], 'image/png', 'photo.png'],
-    [[255, 216, 255, 224, 0, 0, 0, 0, 0, 0, 0, 0], 'image/jpeg', 'photo.jpg'],
-    [[82, 73, 70, 70, 32, 0, 0, 0, 87, 69, 66, 80], 'image/webp', 'photo.webp'],
+test('image headers correct missing and mislabeled formats without re-encoding', async () => {
+  const png = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]
+  for (const [header, type, name, declared] of [
+    [png, 'image/png', 'photo.png', 'image/jpeg'],
+    [png, 'image/png', 'photo.png', ''],
+    [png, 'image/png', 'photo.png', 'application/octet-stream'],
+    [
+      [255, 216, 255, 224, 0, 0, 0, 0, 0, 0, 0, 0],
+      'image/jpeg',
+      'photo.jpg',
+      'image/png',
+    ],
+    [
+      [82, 73, 70, 70, 32, 0, 0, 0, 87, 69, 66, 80],
+      'image/webp',
+      'photo.webp',
+      'image/png',
+    ],
   ]) {
     const { utils, revoked } = imageHarness({ width: 64, height: 64 })
     const source = new File([new Uint8Array(header)], 'photo.wrong', {
-      type: type === 'image/png' ? 'image/jpeg' : 'image/png', lastModified: 123,
+      type: declared,
+      lastModified: 123,
     })
     const { file, resized } = await utils.resizeImageFile(source, 4096)
     assert.equal(resized, false)
@@ -1365,25 +1639,34 @@ test('image headers correct mislabeled formats without re-encoding small files',
   }
 })
 
-test('cancelling a stalled image header read releases decoding resources', async () => {
+test('cancelling a stalled image header read allocates no decoding resources', async () => {
   const { utils, images, revoked } = imageHarness({ width: 64, height: 64 })
-  const source = new File([new Uint8Array(12)], 'photo.png', { type: 'image/png' })
+  const source = new File([new Uint8Array(12)], 'photo.png', {
+    type: 'image/png',
+  })
   let finishRead, started
-  const reading = new Promise(resolve => { started = resolve })
-  source.slice = () => ({ arrayBuffer: () => {
-    started()
-    return new Promise(resolve => { finishRead = resolve })
-  } })
+  const reading = new Promise(resolve => {
+    started = resolve
+  })
+  source.slice = () => ({
+    arrayBuffer: () => {
+      started()
+      return new Promise(resolve => {
+        finishRead = resolve
+      })
+    },
+  })
   const controller = new AbortController()
   const operation = utils.resizeImageFile(source, 4096, controller.signal)
   await reading
   controller.abort()
   await assert.rejects(operation, { name: 'AbortError' })
-  assert.equal(revoked(), 1)
-  assert.equal(images[0].sourceRemoved, true)
+  assert.equal(images.length, 0)
+  assert.equal(revoked(), 0)
   finishRead(new ArrayBuffer(12))
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(revoked(), 1)
+  assert.equal(images.length, 0)
+  assert.equal(revoked(), 0)
 })
 
 test('resizing uses the actual encoder MIME when the requested format falls back', async () => {
@@ -2217,9 +2500,12 @@ test('editor warmup and first inference share a single session initialization', 
 
 test('slow inpaint warmup does not block unrelated inference and still guards repair', async () => {
   let finishDownload
-  const download = new Promise(resolve => { finishDownload = resolve })
+  const download = new Promise(resolve => {
+    finishDownload = resolve
+  })
   const { runtime, events } = runtimeHarness({
-    prepareModel: type => type === 'inpaint' ? download : Promise.resolve(type),
+    prepareModel: type =>
+      type === 'inpaint' ? download : Promise.resolve(type),
   })
   const controller = new AbortController()
   const warmup = runtime.warmupInpaint(controller.signal)
@@ -2231,14 +2517,21 @@ test('slow inpaint warmup does not block unrelated inference and still guards re
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(ran, true, 'Unrelated inference was held behind warmup')
   await upscale
-  await assert.rejects(runtime.repairRuntime(() => {}), /Wait for image processing/)
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
   controller.abort()
   await assert.rejects(warmup, { name: 'AbortError' })
-  await assert.rejects(runtime.repairRuntime(() => {}), /Wait for image processing/)
+  await assert.rejects(
+    runtime.repairRuntime(() => {}),
+    /Wait for image processing/
+  )
   finishDownload('inpaint')
   await runtime.getSession('inpaint')
   assert.deepEqual(events, [
-    ['create', 'superResolution', 'webgpu'], ['create', 'inpaint', 'webgpu'],
+    ['create', 'superResolution', 'webgpu'],
+    ['create', 'inpaint', 'webgpu'],
   ])
   await runtime.repairRuntime(() => {})
 })
@@ -2300,8 +2593,9 @@ test('Canvas RGB conversion retains natural resolution, CHW order and normalizat
   const expected = new Uint8Array([
     255, 10, 254, 255, 0, 20, 254, 255, 128, 30, 254, 255,
   ])
-  assert.deepEqual((await adapter.readImageChannels(image)).rgb, expected)
-  assert.equal((await adapter.readImageChannels(image)).alpha, undefined)
+  const opaque = await adapter.readImageChannels(image)
+  assert.deepEqual(opaque.rgb, expected)
+  assert.equal(Object.hasOwn(opaque, 'alpha'), false)
   assert.deepEqual(
     (await adapter.readImageChannels(image, true)).rgb,
     Float32Array.from(expected, n => n / 255)
@@ -2498,6 +2792,30 @@ test('alpha scaling handles constant opacity and single-pixel sources', async ()
       )
     )
   }
+})
+
+test('alpha scaling rejects mismatched source data before scheduling work', async () => {
+  const { applyResizedAlpha } = loadModule(
+    'src/adapters/alpha.ts',
+    {},
+    {
+      setTimeout: () => assert.fail('invalid alpha must fail before yielding'),
+    }
+  )
+  const result = {
+    width: 2,
+    height: 2,
+    data: new Uint8ClampedArray(16).fill(255),
+  }
+  await assert.rejects(
+    applyResizedAlpha(result, new Uint8Array([0]), 2, 1),
+    /Alpha data length/
+  )
+  await assert.rejects(
+    applyResizedAlpha(result, new Uint8Array([0]), 0, 1),
+    /Alpha data length/
+  )
+  assert.ok(result.data.every(value => value === 255))
 })
 
 test('alpha scaling cancellation stops before writing the next batch', async () => {
@@ -2751,18 +3069,23 @@ test('4x upscaling rejects non-finite visible pixels without running later tiles
     for (let channel = 0; channel < 3; channel++) {
       let runs = 0
       const progress = []
-      await assert.rejects(adapter.tileProc(
-        new Tensor('float32', new Float32Array(3 * 105), [1, 3, 1, 105]),
-        {
-          inputNames: ['rgb'], outputNames: ['result'],
-          run: async () => {
-            const data = new Float32Array(3 * 256 * 256)
-            if (++runs === 2) data[channel * 256 * 256 + 24 * 256 + 24] = invalid
-            return { result: new Tensor('float32', data, [1, 3, 256, 256]) }
+      await assert.rejects(
+        adapter.tileProc(
+          new Tensor('float32', new Float32Array(3 * 105), [1, 3, 1, 105]),
+          {
+            inputNames: ['rgb'],
+            outputNames: ['result'],
+            run: async () => {
+              const data = new Float32Array(3 * 256 * 256)
+              if (++runs === 2)
+                data[channel * 256 * 256 + 24 * 256 + 24] = invalid
+              return { result: new Tensor('float32', data, [1, 3, 256, 256]) }
+            },
           },
-        },
-        p => progress.push(p)
-      ), /non-finite pixel/)
+          p => progress.push(p)
+        ),
+        /non-finite pixel/
+      )
       assert.equal(runs, 2)
       assert.deepEqual(progress, [33])
     }
@@ -2772,21 +3095,28 @@ test('4x upscaling rejects non-finite visible pixels without running later tiles
 test('4x upscaling preserves finite color clipping and ignores discarded padding', async () => {
   const { adapter, Tensor } = upscaleHarness()
   const data = new Float32Array(3 * 256 * 256).fill(NaN)
-  for (let y = 24; y < 28; y++) for (let x = 24; x < 28; x++) {
-    data[y * 256 + x] = -0.25
-    data[256 * 256 + y * 256 + x] = 0.5
-    data[2 * 256 * 256 + y * 256 + x] = 1.25
-  }
+  for (let y = 24; y < 28; y++)
+    for (let x = 24; x < 28; x++) {
+      data[y * 256 + x] = -0.25
+      data[256 * 256 + y * 256 + x] = 0.5
+      data[2 * 256 * 256 + y * 256 + x] = 1.25
+    }
   const result = await adapter.tileProc(
     new Tensor('float32', new Float32Array(3), [1, 3, 1, 1]),
     {
-      inputNames: ['rgb'], outputNames: ['result'],
-      run: async () => ({ result: new Tensor('float32', data, [1, 3, 256, 256]) }),
+      inputNames: ['rgb'],
+      outputNames: ['result'],
+      run: async () => ({
+        result: new Tensor('float32', data, [1, 3, 256, 256]),
+      }),
     },
     () => {}
   )
   for (let offset = 0; offset < result.data.length; offset += 4)
-    assert.deepEqual(Array.from(result.data.slice(offset, offset + 4)), [0, 128, 255, 255])
+    assert.deepEqual(
+      Array.from(result.data.slice(offset, offset + 4)),
+      [0, 128, 255, 255]
+    )
 })
 
 test('4x upscaling rejects malformed inputs before inference or progress', async () => {
@@ -2811,6 +3141,33 @@ test('4x upscaling rejects malformed inputs before inference or progress', async
           called = true
         }
       )
+    )
+    assert.equal(called, false)
+  }
+})
+
+test('4x upscaling rejects missing tensor names before inference', async () => {
+  const { adapter, Tensor } = upscaleHarness()
+  for (const [inputNames, outputNames] of [
+    [[], ['result']],
+    [['rgb'], []],
+  ]) {
+    let called = false
+    await assert.rejects(
+      adapter.tileProc(
+        new Tensor('float32', new Float32Array(3), [1, 3, 1, 1]),
+        {
+          inputNames,
+          outputNames,
+          run: async () => {
+            called = true
+          },
+        },
+        () => {
+          called = true
+        }
+      ),
+      /missing a required input or output name/
     )
     assert.equal(called, false)
   }
@@ -2841,7 +3198,8 @@ function inpaintOutputHarness(
   encodeError = false,
   runSession = async () => ({ result: output }),
   runtimeOverride,
-  alpha
+  alpha,
+  names = { inputNames: ['rgb', 'mask'], outputNames: ['result'] }
 ) {
   let rendered
   const images = []
@@ -2853,7 +3211,7 @@ function inpaintOutputHarness(
     naturalHeight = 1
     width = 20
     height = 10
-    set src(value) {
+    set src(_value) {
       queueMicrotask(() => this.onload?.())
     }
   }
@@ -2880,8 +3238,7 @@ function inpaintOutputHarness(
       './runtime': {
         withRuntime: runtimeOverride?.withRuntime ?? (task => task()),
         getSession: async () => ({
-          inputNames: ['rgb', 'mask'],
-          outputNames: ['result'],
+          ...names,
           run: runSession,
         }),
       },
@@ -2980,6 +3337,28 @@ test('inpainting validates output shape and length before rendering', async () =
   }
 })
 
+test('inpainting rejects missing tensor names before inference', async () => {
+  for (const names of [
+    { inputNames: ['rgb'], outputNames: ['result'] },
+    { inputNames: ['rgb', 'mask'], outputNames: [] },
+  ]) {
+    let called = false
+    const { run, rendered } = inpaintOutputHarness(
+      undefined,
+      false,
+      async () => {
+        called = true
+      },
+      undefined,
+      undefined,
+      names
+    )
+    await assert.rejects(run(), /missing required input or output names/)
+    assert.equal(called, false)
+    assert.equal(rendered(), undefined)
+  }
+})
+
 test('inpainting converts valid planar output to RGBA without changing pixels', async () => {
   const { run, rendered } = inpaintOutputHarness({
     data: new Uint8Array([1, 2, 3, 4, 5, 6]),
@@ -3041,6 +3420,31 @@ test('inpaint output conversion yields between batches and never returns cancell
   )
   assert.equal(yields, 2)
   assert.equal(images, 0)
+})
+
+test('inpaint output conversion rejects malformed buffers before allocation', async () => {
+  const { planarToImageData } = loadModule(
+    'src/adapters/postprocess.ts',
+    {},
+    {
+      setTimeout: () => assert.fail('invalid pixels must fail before yielding'),
+      Uint8ClampedArray: class {
+        constructor() {
+          assert.fail('invalid pixels must fail before output allocation')
+        }
+      },
+    }
+  )
+  for (const [rgb, alpha, width, height] of [
+    [new Uint8Array(3), undefined, 0, 1],
+    [new Uint8Array(2), undefined, 1, 1],
+    [new Uint8Array(3), new Uint8Array(2), 1, 1],
+  ]) {
+    await assert.rejects(
+      planarToImageData(rgb, alpha, width, height),
+      /invalid dimensions|data length/
+    )
+  }
 })
 
 test('cancelled inpaint output conversion performs no allocation or scheduling', async () => {
@@ -3281,6 +3685,7 @@ test('cancelling stalled decoding releases the source and settles the resize', a
     4096,
     controller.signal
   )
+  await new Promise(resolve => setImmediate(resolve))
   controller.abort()
   await assert.rejects(operation, { name: 'AbortError' })
   assert.equal(images[0].onload, null)
@@ -3303,6 +3708,40 @@ test('cancelling pending encoding releases the canvas before a late encoder call
   assert.equal(canvas.width, 4096)
   controller.abort()
   await assert.rejects(operation, { name: 'AbortError' })
+  assert.equal(canvas.width, 0)
+  assert.equal(canvas.height, 0)
+  assert.equal(images[0].sourceRemoved, true)
+  assert.equal(revoked(), 1)
+  finishEncoding(new Blob(['late'], { type: 'image/png' }))
+  assert.equal(revoked(), 1)
+})
+
+test('stalled resize encoding times out, releases resources and ignores late output', async () => {
+  const timers = new Map()
+  let nextTimer = 0
+  const { utils, canvas, images, revoked, finishEncoding } = imageHarness({
+    encodePending: true,
+    clock: {
+      setTimeout(callback, delay) {
+        assert.equal(delay, 30_000)
+        const id = ++nextTimer
+        timers.set(id, callback)
+        return id
+      },
+      clearTimeout(id) {
+        timers.delete(id)
+      },
+    },
+  })
+  const operation = utils.resizeImageFile(
+    new File(['x'], 'x.png', { type: 'image/png' }),
+    4096
+  )
+  await new Promise(setImmediate)
+  assert.equal(timers.size, 1)
+  timers.values().next().value()
+  await assert.rejects(operation, /Image encoding timed out/)
+  assert.equal(timers.size, 0)
   assert.equal(canvas.width, 0)
   assert.equal(canvas.height, 0)
   assert.equal(images[0].sourceRemoved, true)
@@ -3350,6 +3789,7 @@ test('import cancellation and timeout propagate into stalled local decoding', as
     const operation = importer.load(
       new File(['x'], 'x.png', { type: 'image/png' })
     )
+    await new Promise(resolve => setImmediate(resolve))
     if (action === 'timeout') timers.values().next().value()
     else importer[action]()
     await operation

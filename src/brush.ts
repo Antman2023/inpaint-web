@@ -35,6 +35,7 @@ export function drawStroke(
   ctx.lineJoin = 'round'
   ctx.lineWidth = size
   const first = stroke.pts[0]
+  if (!first) return
   ctx.beginPath()
   if (stroke.pts.length === 1) {
     paths.delete(stroke)
@@ -56,16 +57,22 @@ export function drawStroke(
       cached = { points: stroke.pts, width, height, count: 1, path }
       paths.set(stroke, cached)
     }
-    for (; cached.count < stroke.pts.length; cached.count++) {
-      const point = stroke.pts[cached.count]
+    while (cached.count < stroke.pts.length) {
+      const point = stroke.pts.at(cached.count)
+      if (!point) {
+        paths.delete(stroke)
+        return
+      }
       cached.path.lineTo(point.x * width, point.y * height)
+      cached.count++
     }
     ctx.stroke(cached.path)
     return
   }
   ctx.moveTo(first.x * width, first.y * height)
   for (let index = 1; index < stroke.pts.length; index++) {
-    const point = stroke.pts[index]
+    const point = stroke.pts.at(index)
+    if (!point) return
     ctx.lineTo(point.x * width, point.y * height)
   }
   ctx.stroke()

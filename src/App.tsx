@@ -25,7 +25,7 @@ import { useTheme } from './theme'
 import RepairRuntime from './components/RepairRuntime'
 import {
   createImageImporter,
-  IMAGE_TYPES,
+  selectImageCandidate,
   type ImageImportState,
 } from './imageImport'
 
@@ -59,7 +59,7 @@ function App() {
     document.documentElement.lang = stateLanguageTag === 'zh' ? 'zh-CN' : 'en'
   }, [stateLanguageTag])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (file) return
     const pasteImage = (event: ClipboardEvent) => {
       const target = event.target
@@ -73,9 +73,7 @@ function App() {
             target.closest('input:not([type="file"]), textarea, select')))
       )
         return
-      const image = Array.from(event.clipboardData?.files ?? []).find(item =>
-        IMAGE_TYPES.includes(item.type)
-      )
+      const image = selectImageCandidate(event.clipboardData?.files ?? [])
       if (!image) return
       event.preventDefault()
       void importer.load(image)

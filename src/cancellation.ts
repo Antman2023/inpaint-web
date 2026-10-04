@@ -10,9 +10,9 @@ export function waitForAbort<T>(
 }
 
 interface Waiter<T> {
-  signal?: AbortSignal
-  resolve?: (value: T) => void
-  reject?: (reason: unknown) => void
+  signal: AbortSignal | undefined
+  resolve: ((value: T) => void) | undefined
+  reject: ((reason: unknown) => void) | undefined
 }
 
 function subscribe<T>(promise: Promise<T>, waiter: Waiter<T>) {

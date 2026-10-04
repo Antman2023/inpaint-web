@@ -2,11 +2,36 @@ const { test, expect } = require('@playwright/test')
 const messages = require('../../messages/en.json')
 
 for (const sample of [
-  { type: 'image/png', declared: 'image/jpeg', extension: 'png', width: 64 },
-  { type: 'image/jpeg', declared: 'image/png', extension: 'jpg', width: 64 },
-  { type: 'image/png', declared: 'image/jpeg', extension: 'png', width: 4097 },
+  {
+    type: 'image/png',
+    declared: 'image/jpeg',
+    name: 'holiday.jpg',
+    extension: 'png',
+    width: 64,
+  },
+  {
+    type: 'image/jpeg',
+    declared: 'image/png',
+    name: 'holiday.png',
+    extension: 'jpg',
+    width: 64,
+  },
+  {
+    type: 'image/png',
+    declared: 'application/octet-stream',
+    name: 'holiday.bin',
+    extension: 'png',
+    width: 64,
+  },
+  {
+    type: 'image/png',
+    declared: 'image/jpeg',
+    name: 'holiday.jpg',
+    extension: 'png',
+    width: 4097,
+  },
 ]) {
-  test(`import corrects ${sample.type} metadata at width ${sample.width}`, async ({
+  test(`import corrects ${sample.declared} to ${sample.type} at width ${sample.width}`, async ({
     page,
     baseURL,
   }) => {
@@ -29,7 +54,7 @@ for (const sample of [
       return canvas.toDataURL(type).split(',')[1]
     }, sample)
     await page.locator('input[type="file"]').setInputFiles({
-      name: sample.declared === 'image/jpeg' ? 'holiday.jpg' : 'holiday.png',
+      name: sample.name,
       mimeType: sample.declared,
       buffer: Buffer.from(source, 'base64'),
     })
@@ -78,3 +103,106 @@ for (const sample of [
       expect(Buffer.from(exported.bytes)).toEqual(Buffer.from(source, 'base64'))
   })
 }
+
+test('paste accepts a PNG with generic clipboard metadata', async ({
+  page,
+  baseURL,
+}) => {
+  await page.route('**/*', route =>
+    new URL(route.request().url()).origin === baseURL
+      ? route.continue()
+      : route.abort()
+  )
+  await page.addInitScript(() => localStorage.setItem('inpaint-language', 'en'))
+  await page.goto('/')
+  const pasted = await page.evaluate(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 48
+    const context = canvas.getContext('2d')
+    context.fillStyle = '#4488bb'
+    context.fillRect(0, 0, 48, 48)
+    const bytes = Uint8Array.from(
+      atob(canvas.toDataURL('image/png').split(',')[1]),
+      character => character.charCodeAt(0)
+    )
+    canvas.width = canvas.height = 0
+    const transfer = new DataTransfer()
+    transfer.items.add(
+      new File([bytes], 'clipboard.bin', {
+        type: 'application/octet-stream',
+      })
+    )
+    const event = new ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    })
+    // Firefox currently ignores clipboardData passed to synthetic
+    // ClipboardEvent constructors. Real paste events still expose it, so fill
+    // the synthetic event only when the constructor did not retain the file.
+    if (!event.clipboardData?.files.length) {
+      Object.defineProperty(event, 'clipboardData', { value: transfer })
+    }
+    document.body.dispatchEvent(event)
+    return event.defaultPrevented
+  })
+  expect(pasted).toBe(true)
+  await expect(page.locator('.editor-shell fieldset')).toHaveJSProperty(
+    'disabled',
+    false
+  )
+  await expect(page.locator('#upscale-details')).toContainText('48 × 48')
+})
+
+test('drop prefers a generic image candidate over an earlier invalid file', async ({
+  page,
+  baseURL,
+}) => {
+  await page.route('**/*', route =>
+    new URL(route.request().url()).origin === baseURL
+      ? route.continue()
+      : route.abort()
+  )
+  await page.addInitScript(() => localStorage.setItem('inpaint-language', 'en'))
+  await page.goto('/')
+  const accepted = await page.locator('.upload-zone').evaluate(zone => {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 40
+    const context = canvas.getContext('2d')
+    context.fillStyle = '#4488bb'
+    context.fillRect(0, 0, 40, 40)
+    const bytes = Uint8Array.from(
+      atob(canvas.toDataURL('image/png').split(',')[1]),
+      character => character.charCodeAt(0)
+    )
+    canvas.width = canvas.height = 0
+    const transfer = new DataTransfer()
+    transfer.items.add(
+      new File(['not an image'], 'notes.pdf', { type: 'application/pdf' })
+    )
+    transfer.items.add(
+      new File([bytes], 'dropped.bin', {
+        type: 'application/octet-stream',
+      })
+    )
+    const event = new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: transfer,
+    })
+    // Keep the synthetic event representative in engines that omit constructor
+    // data, as Firefox does for ClipboardEvent in the adjacent regression.
+    if (!event.dataTransfer?.files.length) {
+      Object.defineProperty(event, 'dataTransfer', { value: transfer })
+    }
+    zone.dispatchEvent(event)
+    return event.defaultPrevented
+  })
+  expect(accepted).toBe(true)
+  await expect(page.locator('.editor-shell fieldset')).toHaveJSProperty(
+    'disabled',
+    false
+  )
+  await expect(page.locator('#upscale-details')).toContainText('40 × 40')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})

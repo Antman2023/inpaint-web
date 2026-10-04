@@ -19,15 +19,16 @@
     "test:memory": "node --expose-gc --test tests/runtime-memory.cjs && node tests/build-memory.cjs",
     "test:browser": "playwright test",
     "test:models": "node tests/real-model-smoke.cjs",
-    "lint": "biome lint src vite.config.ts",
-    "check": "npm run lint && npm test && npm run test:memory && npm run build",
+    "lint": "biome lint .",
+    "format:check": "prettier --check .",
+    "check": "npm run format:check && npm run lint && npm test && npm run test:memory && npm run build",
     "serve": "vite preview",
     "prepare": "husky",
     "format": "prettier --write ."
   },
   "lint-staged": {
-    "*.{vue,js,ts,jsx,tsx,css,sass,scss,md}": [
-      "prettier --write",
+    "*": [
+      "prettier --write --ignore-unknown",
       "echo '统一格式化完成🌸'"
     ]
   },
@@ -60,5 +61,13 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
     "vite": "^8.1.5"
+  },
+  "overrides": {
+    "@swc/core": "1.16.2"
+  },
+  "allowScripts": {
+    "@swc/core": false,
+    "fsevents@2.3.3": true,
+    "protobufjs": false
   }
 }

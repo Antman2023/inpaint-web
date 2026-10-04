@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { repairRuntime } from '../adapters/runtime'
 import { message } from '../i18n'
 import Button from './Button'
@@ -16,17 +16,30 @@ export default function RepairRuntime({
   const [progress, setProgress] = useState<number | null>(0)
   const [error, setError] = useState('')
   const busy = useRef(false)
+  const mounted = useRef(false)
+
+  useLayoutEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   async function repair() {
     if (busy.current) return
     busy.current = true
     setStatus('working')
     setProgress(0)
+    setError('')
     try {
-      await repairRuntime(setProgress)
+      await repairRuntime(value => {
+        if (mounted.current) setProgress(value)
+      })
+      if (!mounted.current) return
       setStatus('done')
       onRepaired?.()
     } catch (error) {
+      if (!mounted.current) return
       setError(error instanceof Error ? error.message : String(error))
       setStatus('error')
     } finally {
@@ -47,7 +60,9 @@ export default function RepairRuntime({
       {status !== 'idle' && (
         <Modal
           ariaLabel={message('repair_runtime')}
-          onClose={status === 'working' ? undefined : () => setStatus('idle')}
+          {...(status === 'working'
+            ? {}
+            : { onClose: () => setStatus('idle') })}
         >
           <div className="space-y-5" aria-busy={status === 'working'}>
             <h2 className="text-xl font-black">{message('repair_runtime')}</h2>

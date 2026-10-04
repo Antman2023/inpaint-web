@@ -24,51 +24,54 @@ async function main() {
     })
     await page.goto('http://127.0.0.1:4181/')
     const result = await Promise.race([
-      page.evaluate(async ({ verifyRepair, verifyWarmup }) => {
-        const { runBrowserSmoke } = await import('/tests/browser-smoke.mjs')
-        const options = {
-          exerciseCancellation: true,
-          exerciseWarmup: verifyWarmup,
-          onProgress: status => void window.reportModelSmoke(status),
-        }
-        const initial = await runBrowserSmoke(options)
-        if (!verifyRepair) return initial
-        const { repairRuntime, hasSession } =
-          await import('/src/adapters/runtime.ts')
-        const previousRuntime = window.ort
-        let reported = -1
-        await repairRuntime(progress => {
-          const bucket = progress === null ? null : Math.floor(progress / 10)
-          if (bucket !== reported) {
-            reported = bucket
-            void window.reportModelSmoke({ operation: 'repair', progress })
+      page.evaluate(
+        async ({ verifyRepair, verifyWarmup }) => {
+          const { runBrowserSmoke } = await import('/tests/browser-smoke.mjs')
+          const options = {
+            exerciseCancellation: true,
+            exerciseWarmup: verifyWarmup,
+            onProgress: status => void window.reportModelSmoke(status),
           }
-        })
-        if (
-          window.ort === previousRuntime ||
-          !hasSession('inpaint') ||
-          !hasSession('superResolution')
-        ) {
-          throw new Error(
-            'Repair did not replace the runtime and recreate both sessions'
+          const initial = await runBrowserSmoke(options)
+          if (!verifyRepair) return initial
+          const { repairRuntime, hasSession } =
+            await import('/src/adapters/runtime.ts')
+          const previousRuntime = window.ort
+          let reported = -1
+          await repairRuntime(progress => {
+            const bucket = progress === null ? null : Math.floor(progress / 10)
+            if (bucket !== reported) {
+              reported = bucket
+              void window.reportModelSmoke({ operation: 'repair', progress })
+            }
+          })
+          if (
+            window.ort === previousRuntime ||
+            !hasSession('inpaint') ||
+            !hasSession('superResolution')
+          ) {
+            throw new Error(
+              'Repair did not replace the runtime and recreate both sessions'
+            )
+          }
+          const afterRepair = await runBrowserSmoke(options)
+          const scripts = document.querySelectorAll(
+            'script[src*="onnxruntime-web"]'
           )
+          if (scripts.length)
+            throw new Error('Runtime script elements accumulated after repair')
+          return {
+            initial,
+            repair: 'passed',
+            afterRepair,
+            runtimeScriptElements: scripts.length,
+          }
+        },
+        {
+          verifyRepair: process.env.MODEL_SMOKE_REPAIR === '1',
+          verifyWarmup: process.env.MODEL_SMOKE_WARMUP === '1',
         }
-        const afterRepair = await runBrowserSmoke(options)
-        const scripts = document.querySelectorAll(
-          'script[src*="onnxruntime-web"]'
-        )
-        if (scripts.length)
-          throw new Error('Runtime script elements accumulated after repair')
-        return {
-          initial,
-          repair: 'passed',
-          afterRepair,
-          runtimeScriptElements: scripts.length,
-        }
-      }, {
-        verifyRepair: process.env.MODEL_SMOKE_REPAIR === '1',
-        verifyWarmup: process.env.MODEL_SMOKE_WARMUP === '1',
-      }),
+      ),
       new Promise((_, reject) => {
         timeout = setTimeout(
           () => reject(new Error('Real model smoke timed out after 5 minutes')),

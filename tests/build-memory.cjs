@@ -8,6 +8,9 @@ async function main() {
   const root = resolve(__dirname, '..')
   const temporaryRoot = resolve(tmpdir())
   const output = mkdtempSync(join(temporaryRoot, 'inpaint-memory-'))
+  const location = relative(temporaryRoot, output)
+  if (!location.startsWith('inpaint-memory-') || location.includes(sep))
+    throw new Error('Unexpected temporary build directory')
   try {
     const entries = {}
     const collect = directory => {
@@ -32,22 +35,27 @@ async function main() {
         rollupOptions: {
           // Preserve imports for the same dependency injection as source tests.
           external: id => !Object.values(entries).includes(id),
-          output: { entryFileNames: '[name].cjs', paths: id => id, exports: 'named' },
+          output: {
+            entryFileNames: '[name].cjs',
+            paths: id => id,
+            exports: 'named',
+          },
         },
       },
     })
-    const result = spawnSync(process.execPath, ['--expose-gc', '--test', 'tests/runtime-memory.cjs'], {
-      cwd: root,
-      env: { ...process.env, MEMORY_COMPILED_DIR: output },
-      stdio: 'inherit',
-      timeout: 60_000,
-    })
+    const result = spawnSync(
+      process.execPath,
+      ['--expose-gc', '--test', 'tests/runtime-memory.cjs'],
+      {
+        cwd: root,
+        env: { ...process.env, MEMORY_COMPILED_DIR: output },
+        stdio: 'inherit',
+        timeout: 60_000,
+      }
+    )
     if (result.error) throw result.error
     process.exitCode = result.status ?? 1
   } finally {
-    const location = relative(temporaryRoot, output)
-    if (!location.startsWith('inpaint-memory-') || location.includes(sep))
-      throw new Error('Unexpected temporary build directory')
     rmSync(output, { recursive: true, force: true })
   }
 }

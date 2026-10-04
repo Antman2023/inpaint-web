@@ -86,11 +86,10 @@ export default function Editor(props: EditorProps) {
   const hideBrushTimeoutRef = useRef<number>()
   const [showOriginal, setShowOriginal] = useState(false)
   const [isInpaintingLoading, setIsProcessingLoading] = useState(false)
-  const [processingError, setProcessingError] = useState<{
-    operation: 'inpaint' | 'upscale'
-    details: string
-    retry?: () => void
-  }>()
+  const [processingError, setProcessingError] = useState<
+    | { operation: 'inpaint'; details: string; retry: () => void }
+    | { operation: 'upscale'; details: string }
+  >()
   const [generateProgress, setGenerateProgress] = useState(0)
   const [upscaleStatus, setUpscaleStatus] = useState<UpscaleStatus>()
   const processingBusy = useRef(false)

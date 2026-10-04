@@ -19,6 +19,19 @@ async function main() {
       'require-corp'
     )
     assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+    assert.equal(
+      response.headers.get('referrer-policy'),
+      'strict-origin-when-cross-origin'
+    )
+    assert.equal(response.headers.get('x-frame-options'), 'DENY')
+    assert.equal(
+      response.headers.get('content-security-policy'),
+      "frame-ancestors 'none'"
+    )
+    assert.equal(
+      response.headers.get('permissions-policy'),
+      'camera=(), microphone=(), geolocation=()'
+    )
   }
   const index = await request('/')
   assert.equal(index.status, 200)
@@ -110,7 +123,7 @@ async function main() {
     assert.notEqual(await response.text(), html, path)
   }
   console.log(
-    'Deployment checks passed: JS/CSS assets, gzip integrity, HEAD, ETag/304, cache policies, isolation headers, SPA fallback and missing-resource 404s.'
+    'Deployment checks passed: JS/CSS assets, gzip integrity, HEAD, ETag/304, cache policies, security headers, SPA fallback and missing-resource 404s.'
   )
 }
 

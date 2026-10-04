@@ -14,8 +14,12 @@ function systemTheme(): Theme {
     : 'light'
 }
 
+function themeDataset() {
+  return document.documentElement.dataset as DOMStringMap & { theme?: string }
+}
+
 function initialTheme(): Theme {
-  const documentTheme = document.documentElement.dataset.theme ?? null
+  const documentTheme = themeDataset().theme ?? null
   if (isTheme(documentTheme)) {
     return documentTheme
   }
@@ -33,7 +37,7 @@ function initialTheme(): Theme {
 }
 
 function applyTheme(theme: Theme) {
-  document.documentElement.dataset.theme = theme
+  themeDataset().theme = theme
   document.documentElement.style.colorScheme = theme
 }
 

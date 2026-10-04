@@ -8,25 +8,38 @@ export async function applyResizedAlpha(
   signal?: AbortSignal
 ) {
   signal?.throwIfAborted()
-  if (!alpha || alpha.every(value => value === 255)) return
-  const lefts = new Uint32Array(result.width)
-  const rights = new Uint32Array(result.width)
-  const fractions = new Float64Array(result.width)
-  for (let x = 0; x < result.width; x++) {
+  if (!alpha) return
+  if (
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width < 1 ||
+    height < 1 ||
+    alpha.length !== width * height
+  ) {
+    throw new Error('Alpha data length does not match source dimensions')
+  }
+  if (alpha.every(value => value === 255)) return
+  const columns = Array.from({ length: result.width }, (_, x) => {
     const sourceX = Math.max(
       0,
       Math.min(width - 1, ((x + 0.5) * width) / result.width - 0.5)
     )
-    lefts[x] = Math.floor(sourceX)
-    rights[x] = Math.min(width - 1, lefts[x] + 1)
-    fractions[x] = sourceX - lefts[x]
-  }
+    const left = Math.floor(sourceX)
+    return {
+      left,
+      right: Math.min(width - 1, left + 1),
+      fraction: sourceX - left,
+    }
+  })
   const rowsPerBatch = Math.max(1, Math.floor(1_000_000 / result.width))
   for (let y = 0; y < result.height; y++) {
     if (y % rowsPerBatch === 0) {
       // Paint the output status and deliver cancellation between bounded batches.
       await new Promise(resolve => setTimeout(resolve, 0))
       signal?.throwIfAborted()
+      if (alpha.length !== width * height) {
+        throw new Error('Alpha data became unavailable during scaling')
+      }
     }
     const sourceY = Math.max(
       0,
@@ -38,14 +51,13 @@ export async function applyResizedAlpha(
     const topOffset = top * width
     const bottomOffset = bottom * width
     const rowOffset = y * result.width * 4
-    for (let x = 0; x < result.width; x++) {
-      const left = lefts[x]
-      const right = rights[x]
-      const fx = fractions[x]
+    for (const [x, { left, right, fraction: fx }] of columns.entries()) {
       const a =
-        alpha[topOffset + left] * (1 - fx) + alpha[topOffset + right] * fx
+        (alpha[topOffset + left] ?? 255) * (1 - fx) +
+        (alpha[topOffset + right] ?? 255) * fx
       const b =
-        alpha[bottomOffset + left] * (1 - fx) + alpha[bottomOffset + right] * fx
+        (alpha[bottomOffset + left] ?? 255) * (1 - fx) +
+        (alpha[bottomOffset + right] ?? 255) * fx
       result.data[rowOffset + x * 4 + 3] = a * (1 - fy) + b * fy
     }
   }
