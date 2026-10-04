@@ -56,6 +56,8 @@ Vite 迁移后遗留的 `react-app-env.d.ts` 与仅包含未使用 CRA 变量的
 
 Vite 8.3.2 启动时建议无自定义 SWC 插件的项目改用 Oxc 驱动的 `@vitejs/plugin-react`。按建议临时切换到当前 6.1.1 后，专用 Fast Refresh 回归确认转换结果仍未把 `@refresh reset` 编译为强制重挂载标记；这会让 cleanup 已释放的导入器、处理控制器和历史 URL 在热更新后被继续复用。因此恢复 `@vitejs/plugin-react-swc` 与既有 SWC 固定版本，保留语义正确性，并继续用浏览器回归约束后续迁移。
 
+推送后的 Windows Node 24 作业在 `format:check` 报告 84 个文件不符合格式，而相同提交的两个 Ubuntu 作业、三浏览器回归和生产容器均通过。日志与本地属性检查确认 Git for Windows 的全局 `core.autocrlf=true` 在缺少仓库属性时把索引中的 LF 转为 CRLF；新增 `.gitattributes` 为所有自动识别的文本固定 LF，并明确标记现有二进制媒体格式，Prettier 同步显式设置 `endOfLine: lf`。工具链回归锁定这两项跨平台契约，避免 Windows 新检出再次产生整仓格式误报。
+
 ## 2026-09-22
 
 环境：Windows、Node.js v24.21.0，使用项目安装的 Playwright 浏览器及独立 Vite 测试服务。以下结果针对包含画笔采样、图片格式纠正和弹窗拖动修复的当前工作区。

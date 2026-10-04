@@ -6,13 +6,18 @@ const test = require('node:test')
 const root = resolve(__dirname, '..')
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
 const biome = JSON.parse(readFileSync(resolve(root, 'biome.json'), 'utf8'))
+const prettier = JSON.parse(readFileSync(resolve(root, '.prettierrc'), 'utf8'))
 const tsconfig = JSON.parse(
   readFileSync(resolve(root, 'tsconfig.json'), 'utf8')
 )
 
 test('format checks cover the repository and every supported staged file', () => {
+  const attributes = readFileSync(resolve(root, '.gitattributes'), 'utf8')
+
   assert.equal(manifest.scripts['format:check'], 'prettier --check .')
   assert.match(manifest.scripts.check, /^npm run format:check && /)
+  assert.equal(prettier.endOfLine, 'lf')
+  assert.match(attributes, /^\* text=auto eol=lf$/m)
   assert.deepEqual(manifest['lint-staged'], {
     '*': ['prettier --write --ignore-unknown', "echo '统一格式化完成🌸'"],
   })
