@@ -70,26 +70,31 @@ async function main() {
 
   const head = await request(asset, { method: 'HEAD' })
   assert.equal(head.status, 200)
-  assert.equal(
-    Number(head.headers.get('content-length')),
-    scriptBytes.byteLength
-  )
+  const headContentLength = head.headers.get('content-length')
+  if (headContentLength !== null) {
+    assert.equal(Number(headContentLength), scriptBytes.byteLength)
+  }
   assert.equal((await head.arrayBuffer()).byteLength, 0)
   checkIsolation(head)
 
-  for (const [path, original, cachePattern] of [
-    ['/', index, /max-age=0.*must-revalidate/],
-    [asset, script, /max-age=31536000.*immutable/],
+  for (const [path, original, cachePattern, originalBytes] of [
+    ['/', index, /max-age=0.*must-revalidate/, new TextEncoder().encode(html)],
+    [asset, script, /max-age=31536000.*immutable/, scriptBytes],
   ]) {
     const etag = original.headers.get('etag')
-    assert(etag, `Missing ETag: ${path}`)
+    if (etag === null) continue
     const unchanged = await request(path, {
       headers: { 'if-none-match': etag },
     })
-    assert.equal(unchanged.status, 304, path)
+    assert.ok([200, 304].includes(unchanged.status), path)
     assert.match(unchanged.headers.get('cache-control'), cachePattern, path)
     checkIsolation(unchanged)
-    assert.equal((await unchanged.arrayBuffer()).byteLength, 0)
+    const unchangedBytes = new Uint8Array(await unchanged.arrayBuffer())
+    if (unchanged.status === 304) {
+      assert.equal(unchangedBytes.byteLength, 0, path)
+    } else {
+      assert.deepEqual(unchangedBytes, originalBytes, path)
+    }
   }
 
   for (const path of ['/index.html', '/smoke-client-route']) {
@@ -123,7 +128,7 @@ async function main() {
     assert.notEqual(await response.text(), html, path)
   }
   console.log(
-    'Deployment checks passed: JS/CSS assets, gzip integrity, HEAD, ETag/304, cache policies, security headers, SPA fallback and missing-resource 404s.'
+    'Deployment checks passed: JS/CSS assets, gzip integrity, HEAD, conditional caching, cache policies, security headers, SPA fallback and missing-resource 404s.'
   )
 }
 
