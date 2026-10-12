@@ -23,11 +23,7 @@ import Modal from './components/Modal'
 import { type LanguageTag, languageTag, message, setLanguageTag } from './i18n'
 import { useTheme } from './theme'
 import RepairRuntime from './components/RepairRuntime'
-import {
-  createImageImporter,
-  selectImageCandidate,
-  type ImageImportState,
-} from './imageImport'
+import { createImageImporter, type ImageImportState } from './imageImport'
 
 const EXAMPLE_IMAGES = ['bag', 'dog', 'car', 'bird', 'jacket', 'shoe', 'paris']
 const Editor = lazy(() => import('./Editor'))
@@ -73,10 +69,11 @@ function App() {
             target.closest('input:not([type="file"]), textarea, select')))
       )
         return
-      const image = selectImageCandidate(event.clipboardData?.files ?? [])
-      if (!image) return
+      // Snapshot the event's files before the asynchronous importer reads headers.
+      const images = Array.from(event.clipboardData?.files ?? [])
+      if (!images.length) return
       event.preventDefault()
-      void importer.load(image)
+      void importer.load(images)
     }
     window.addEventListener('paste', pasteImage)
     return () => window.removeEventListener('paste', pasteImage)

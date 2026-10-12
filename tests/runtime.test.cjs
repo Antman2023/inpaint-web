@@ -175,7 +175,11 @@ test('invalid history selections and navigation on an empty history are harmless
   assert.equal(historyReducer(empty, { type: 'redo' }), empty)
 })
 
-function importHarness({ fetch, resize = async file => ({ file }) } = {}) {
+function importHarness({
+  fetch,
+  resize = async file => ({ file }),
+  normalize = async file => file,
+} = {}) {
   const states = [],
     timers = new Map()
   let nextTimer = 0
@@ -183,7 +187,7 @@ function importHarness({ fetch, resize = async file => ({ file }) } = {}) {
     'src/imageImport.ts',
     {
       './utils': {
-        normalizeImageType: async file => file,
+        normalizeImageType: normalize,
         resizeImageFile: resize,
       },
       './i18n': { message: key => key },
@@ -204,24 +208,128 @@ function importHarness({ fetch, resize = async file => ({ file }) } = {}) {
   }
 }
 
-test('image candidates prefer supported and sniffable files consistently', () => {
-  const { selectImageCandidate } = loadModule('src/imageImport.ts', {
-    './utils': {},
-    './i18n': { message: key => key },
-  })
+test('image candidates skip unrecognized generic files and prefer explicit image types', async () => {
+  const inspected = []
   const invalid = new File(['text'], 'notes.txt', { type: 'text/plain' })
+  const genericText = new File(['text'], 'notes.bin', {
+    type: 'application/octet-stream',
+  })
   const generic = new File(['png'], 'image.bin', {
     type: 'application/octet-stream',
   })
   const unspecified = new File(['png'], 'image', { type: '' })
   const supported = new File(['png'], 'image.png', { type: 'image/png' })
-
-  assert.equal(selectImageCandidate([invalid, generic]), generic)
-  assert.equal(selectImageCandidate([invalid, unspecified]), unspecified)
-  assert.equal(selectImageCandidate([generic, supported]), supported)
-  assert.equal(selectImageCandidate([invalid]), invalid)
-  assert.equal(selectImageCandidate([]), undefined)
+  const { selectImageCandidate } = loadModule('src/imageImport.ts', {
+    './utils': {
+      normalizeImageType: async file => {
+        inspected.push(file)
+        return file === generic || file === unspecified
+          ? new File([file], file.name, { type: 'image/png' })
+          : file
+      },
+    },
+    './i18n': { message: key => key },
+  })
+  assert.equal(
+    (await selectImageCandidate([invalid, genericText, generic])).name,
+    generic.name
+  )
+  assert.deepEqual(inspected, [genericText, generic])
+  assert.equal(
+    (await selectImageCandidate([invalid, unspecified])).type,
+    'image/png'
+  )
+  inspected.length = 0
+  assert.equal(await selectImageCandidate([generic, supported]), supported)
+  assert.deepEqual(inspected, [])
+  assert.equal(await selectImageCandidate([invalid]), invalid)
+  assert.equal(await selectImageCandidate([]), undefined)
 })
+
+test('reselection cancels candidate scanning before it reads further files', async () => {
+  const inspected = []
+  let finish
+  const { importer, states, timers } = importHarness({
+    normalize: (file, signal) => {
+      inspected.push({ file, signal })
+      return new Promise(resolve => {
+        finish = resolve
+      })
+    },
+  })
+  const first = new File(['text'], 'notes')
+  const second = new File(['png'], 'image.bin', {
+    type: 'application/octet-stream',
+  })
+  const pending = importer.load([first, second])
+  const replacement = new File(['png'], 'replacement.png', {
+    type: 'image/png',
+  })
+  await importer.load(replacement)
+  assert.equal(inspected[0].signal.aborted, true)
+  assert.equal(inspected[0].file, first)
+  finish(first)
+  await pending
+  assert.equal(inspected.length, 1)
+  assert.deepEqual(
+    states.map(state => state.status),
+    ['loading', 'loading', 'ready']
+  )
+  assert.equal(states.at(-1).file, replacement)
+  assert.equal(timers.size, 0)
+})
+
+for (const interruption of ['cancel', 'timeout', 'dispose']) {
+  test(`${interruption} settles a stalled candidate header read without importing a late image`, async () => {
+    const { waitForAbort } = loadModule('src/cancellation.ts')
+    let finish,
+      signal,
+      resized = 0
+    const { importer, states, timers } = importHarness({
+      normalize: (_file, requestSignal) => {
+        signal = requestSignal
+        return waitForAbort(
+          new Promise(resolve => {
+            finish = resolve
+          }),
+          signal
+        )
+      },
+      resize: async file => {
+        resized++
+        return { file }
+      },
+    })
+    const image = new File(['png'], 'image.bin', {
+      type: 'application/octet-stream',
+    })
+    const pending = importer.load([image])
+    if (interruption === 'timeout') [...timers.values()][0]()
+    else importer[interruption]()
+    await pending
+    assert.equal(signal.aborted, true)
+    const expected =
+      interruption === 'timeout'
+        ? ['loading', 'error']
+        : interruption === 'cancel'
+          ? ['loading', 'idle']
+          : ['loading']
+    assert.deepEqual(
+      states.map(state => state.status),
+      expected
+    )
+    if (interruption === 'timeout')
+      assert.equal(states.at(-1).error, 'image_import_timeout')
+    finish(new File([image], 'image.png', { type: 'image/png' }))
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(
+      states.map(state => state.status),
+      expected
+    )
+    assert.equal(resized, 0)
+    assert.equal(timers.size, 0)
+  })
+}
 
 test('a late example response cannot replace a newer uploaded image', async () => {
   let finish, signal

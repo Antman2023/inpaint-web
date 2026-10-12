@@ -4,15 +4,24 @@ import { message } from './i18n'
 export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
-export function selectImageCandidate(files: Iterable<File>) {
+export async function selectImageCandidate(
+  files: Iterable<File>,
+  signal?: AbortSignal
+) {
+  signal?.throwIfAborted()
   const candidates = Array.from(files)
-  return (
-    candidates.find(file => IMAGE_TYPES.includes(file.type)) ??
-    candidates.find(
-      file => !file.type || file.type === 'application/octet-stream'
-    ) ??
-    candidates[0]
+  const supported = candidates.find(file => IMAGE_TYPES.includes(file.type))
+  if (supported) return supported
+  const generic = candidates.filter(
+    file => !file.type || file.type === 'application/octet-stream'
   )
+  for (const file of generic) {
+    const normalized = await normalizeImageType(file, signal)
+    signal?.throwIfAborted()
+    if (IMAGE_TYPES.includes(normalized.type)) return normalized
+  }
+  // Retain an invalid candidate so the importer can explain the rejection.
+  return generic[0] ?? candidates[0]
 }
 
 async function readExample(response: Response) {
@@ -93,7 +102,7 @@ export function createImageImporter(
   }
 
   return {
-    async load(source: File | string) {
+    async load(source: File | File[] | string) {
       if (disposed) return
       stop()
       const request = new AbortController()
@@ -116,6 +125,11 @@ export function createImageImporter(
           file = new File([blob], source.split('/').at(-1) ?? 'example.jpeg', {
             type: blob.type,
           })
+        } else if (Array.isArray(source)) {
+          const candidate = await selectImageCandidate(source, request.signal)
+          if (active !== request) return
+          if (!candidate) throw new Error(message('invalid_file'))
+          file = candidate
         } else {
           file = source
         }

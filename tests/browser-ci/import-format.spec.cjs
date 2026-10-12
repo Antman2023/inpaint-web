@@ -154,55 +154,157 @@ test('paste accepts a PNG with generic clipboard metadata', async ({
   await expect(page.locator('#upscale-details')).toContainText('48 × 48')
 })
 
-test('drop prefers a generic image candidate over an earlier invalid file', async ({
+for (const method of ['drop', 'paste']) {
+  test(`${method} skips non-image files with blank or generic metadata`, async ({
+    page,
+    baseURL,
+  }) => {
+    await page.route('**/*', route =>
+      new URL(route.request().url()).origin === baseURL
+        ? route.continue()
+        : route.abort()
+    )
+    await page.addInitScript(() =>
+      localStorage.setItem('inpaint-language', 'en')
+    )
+    await page.goto('/')
+    const accepted = await page
+      .locator('.upload-zone')
+      .evaluate((zone, method) => {
+        const canvas = document.createElement('canvas')
+        canvas.width = canvas.height = 40
+        const context = canvas.getContext('2d')
+        context.fillStyle = '#4488bb'
+        context.fillRect(0, 0, 40, 40)
+        const bytes = Uint8Array.from(
+          atob(canvas.toDataURL('image/png').split(',')[1]),
+          character => character.charCodeAt(0)
+        )
+        canvas.width = canvas.height = 0
+        const transfer = new DataTransfer()
+        transfer.items.add(
+          new File(['not an image'], 'notes.pdf', { type: 'application/pdf' })
+        )
+        transfer.items.add(
+          new File(['plain text without a MIME type'], 'notes')
+        )
+        transfer.items.add(
+          new File(['plain text with generic metadata'], 'notes.bin', {
+            type: 'application/octet-stream',
+          })
+        )
+        transfer.items.add(
+          new File([bytes], 'dropped.bin', {
+            type: 'application/octet-stream',
+          })
+        )
+        const event =
+          method === 'drop'
+            ? new DragEvent('drop', {
+                bubbles: true,
+                cancelable: true,
+                dataTransfer: transfer,
+              })
+            : new ClipboardEvent('paste', {
+                bubbles: true,
+                cancelable: true,
+                clipboardData: transfer,
+              })
+        // Keep the synthetic event representative in engines that omit constructor
+        // data, as Firefox does for ClipboardEvent in the adjacent regression.
+        const property = method === 'drop' ? 'dataTransfer' : 'clipboardData'
+        if (!event[property]?.files.length) {
+          Object.defineProperty(event, property, { value: transfer })
+        }
+        zone.dispatchEvent(event)
+        return event.defaultPrevented
+      }, method)
+    expect(accepted).toBe(true)
+    await expect(page.locator('.editor-shell fieldset')).toHaveJSProperty(
+      'disabled',
+      false
+    )
+    await expect(page.locator('#upscale-details')).toContainText('40 × 40')
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+}
+
+test('a new selection replaces a stalled drop header scan and ignores its late result', async ({
   page,
   baseURL,
 }) => {
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
   await page.route('**/*', route =>
     new URL(route.request().url()).origin === baseURL
       ? route.continue()
       : route.abort()
   )
-  await page.addInitScript(() => localStorage.setItem('inpaint-language', 'en'))
+  await page.addInitScript(() => {
+    localStorage.setItem('inpaint-language', 'en')
+    const slice = File.prototype.slice
+    window.__headerReads = []
+    File.prototype.slice = function (...args) {
+      window.__headerReads.push(this.name)
+      if (this.name === 'stalled-header.bin') {
+        return {
+          arrayBuffer: () =>
+            new Promise(resolve => {
+              window.__finishHeaderRead = resolve
+            }),
+        }
+      }
+      return slice.apply(this, args)
+    }
+  })
   await page.goto('/')
-  const accepted = await page.locator('.upload-zone').evaluate(zone => {
-    const canvas = document.createElement('canvas')
-    canvas.width = canvas.height = 40
-    const context = canvas.getContext('2d')
-    context.fillStyle = '#4488bb'
-    context.fillRect(0, 0, 40, 40)
-    const bytes = Uint8Array.from(
-      atob(canvas.toDataURL('image/png').split(',')[1]),
-      character => character.charCodeAt(0)
-    )
-    canvas.width = canvas.height = 0
+  await page.locator('.upload-zone').evaluate(zone => {
     const transfer = new DataTransfer()
     transfer.items.add(
-      new File(['not an image'], 'notes.pdf', { type: 'application/pdf' })
+      new File(['more than twelve text bytes'], 'stalled-header.bin')
     )
     transfer.items.add(
-      new File([bytes], 'dropped.bin', {
-        type: 'application/octet-stream',
-      })
+      new File(['more than twelve text bytes'], 'old-second.bin')
     )
     const event = new DragEvent('drop', {
       bubbles: true,
       cancelable: true,
       dataTransfer: transfer,
     })
-    // Keep the synthetic event representative in engines that omit constructor
-    // data, as Firefox does for ClipboardEvent in the adjacent regression.
-    if (!event.dataTransfer?.files.length) {
+    if (!event.dataTransfer?.files.length)
       Object.defineProperty(event, 'dataTransfer', { value: transfer })
-    }
     zone.dispatchEvent(event)
-    return event.defaultPrevented
   })
-  expect(accepted).toBe(true)
+  await expect
+    .poll(() => page.evaluate(() => typeof window.__finishHeaderRead))
+    .toBe('function')
+  const png = await page.evaluate(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 32
+    return canvas.toDataURL().split(',')[1]
+  })
+  await page.locator('input[type="file"]').setInputFiles({
+    name: 'replacement.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(png, 'base64'),
+  })
   await expect(page.locator('.editor-shell fieldset')).toHaveJSProperty(
     'disabled',
     false
   )
-  await expect(page.locator('#upscale-details')).toContainText('40 × 40')
+  await page.evaluate(async () => {
+    window.__finishHeaderRead(
+      new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]).buffer
+    )
+    // Let the abandoned header promise and its continuation settle.
+    await new Promise(resolve => setTimeout(resolve, 50))
+  })
+  await expect(page.locator('#upscale-details')).toContainText('32 × 32')
   await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(
+    await page.evaluate(() =>
+      window.__headerReads.filter(name => name !== 'replacement.png')
+    )
+  ).toEqual(['stalled-header.bin'])
+  expect(errors).toEqual([])
 })

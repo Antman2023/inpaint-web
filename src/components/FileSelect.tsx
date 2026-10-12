@@ -1,10 +1,10 @@
 import { PhotographIcon } from '@heroicons/react/outline'
 import { type Ref, useRef, useState } from 'react'
 import { message } from '../i18n'
-import { IMAGE_TYPES, selectImageCandidate } from '../imageImport'
+import { IMAGE_TYPES } from '../imageImport'
 
 type FileSelectProps = {
-  onSelection: (file: File) => void
+  onSelection: (file: File | File[]) => void
   busy?: boolean
   inputRef?: Ref<HTMLInputElement>
 }
@@ -24,9 +24,9 @@ export default function FileSelect(props: FileSelectProps) {
     dragDepth.current = 0
     setDragHover(false)
     // This editor accepts one image at a time.
-    const file = selectImageCandidate(ev.dataTransfer.files)
-    setDropError(!file)
-    if (file) onSelection(file)
+    const files = Array.from(ev.dataTransfer.files)
+    setDropError(!files.length)
+    if (files.length) onSelection(files)
   }
 
   return (
