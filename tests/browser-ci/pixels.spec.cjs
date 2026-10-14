@@ -8,6 +8,17 @@ for (const check of [
     expected: { pixelComparisons: 10, status: 'passed' },
   },
   {
+    name: 'output conversion and alpha scaling preserve every RGBA pixel',
+    path: '/tests/browser-postprocess.mjs',
+    exportName: 'runPostprocessSmoke',
+    expected: {
+      convertedPixels: 1_044_483,
+      opacityModes: 2,
+      scaledPixels: 1_065_008,
+      status: 'passed',
+    },
+  },
+  {
     name: 'strip preprocessing preserves RGB, alpha and scaled masks',
     path: '/tests/browser-preprocess.mjs',
     exportName: 'runPreprocessSmoke',

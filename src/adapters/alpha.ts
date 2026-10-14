@@ -51,7 +51,11 @@ export async function applyResizedAlpha(
     const topOffset = top * width
     const bottomOffset = bottom * width
     const rowOffset = y * result.width * 4
-    for (const [x, { left, right, fraction: fx }] of columns.entries()) {
+    // Avoid an iterator result and entry pair for every output pixel.
+    for (let x = 0; x < columns.length; x++) {
+      const column = columns[x]
+      if (!column) throw new Error('Alpha interpolation column is missing')
+      const { left, right, fraction: fx } = column
       const a =
         (alpha[topOffset + left] ?? 255) * (1 - fx) +
         (alpha[topOffset + right] ?? 255) * fx

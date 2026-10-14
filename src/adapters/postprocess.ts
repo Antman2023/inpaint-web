@@ -29,23 +29,13 @@ export async function planarToImageData(
       throw new Error('Pixel data became unavailable during conversion')
     }
     const end = Math.min(pixels, start + batchSize)
-    rgb.subarray(start, end).forEach((value, index) => {
-      data[(start + index) * 4] = value
-    })
-    rgb.subarray(pixels + start, pixels + end).forEach((value, index) => {
-      data[(start + index) * 4 + 1] = value
-    })
-    rgb
-      .subarray(pixels * 2 + start, pixels * 2 + end)
-      .forEach((value, index) => {
-        data[(start + index) * 4 + 2] = value
-      })
-    if (alpha) {
-      alpha.subarray(start, end).forEach((value, index) => {
-        data[(start + index) * 4 + 3] = value
-      })
-    } else {
-      for (let i = start; i < end; i++) data[i * 4 + 3] = 255
+    // Write each RGBA pixel together instead of traversing the output four
+    // times and invoking a callback for every channel of every pixel.
+    for (let i = start, offset = start * 4; i < end; i++, offset += 4) {
+      data[offset] = rgb[i] ?? 0
+      data[offset + 1] = rgb[pixels + i] ?? 0
+      data[offset + 2] = rgb[pixels * 2 + i] ?? 0
+      data[offset + 3] = alpha?.[i] ?? 255
     }
   }
   return new ImageData(data, width, height)
