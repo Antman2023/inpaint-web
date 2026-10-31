@@ -208,7 +208,7 @@ function importHarness({
   }
 }
 
-test('image candidates skip unrecognized generic files and prefer explicit image types', async () => {
+test('image candidates inspect incorrect metadata and prefer explicit image types', async () => {
   const inspected = []
   const invalid = new File(['text'], 'notes.txt', { type: 'text/plain' })
   const genericText = new File(['text'], 'notes.bin', {
@@ -218,12 +218,13 @@ test('image candidates skip unrecognized generic files and prefer explicit image
     type: 'application/octet-stream',
   })
   const unspecified = new File(['png'], 'image', { type: '' })
+  const mislabeled = new File(['png'], 'image.txt', { type: 'text/plain' })
   const supported = new File(['png'], 'image.png', { type: 'image/png' })
   const { selectImageCandidate } = loadModule('src/imageImport.ts', {
     './utils': {
       normalizeImageType: async file => {
         inspected.push(file)
-        return file === generic || file === unspecified
+        return file === generic || file === unspecified || file === mislabeled
           ? new File([file], file.name, { type: 'image/png' })
           : file
       },
@@ -234,9 +235,13 @@ test('image candidates skip unrecognized generic files and prefer explicit image
     (await selectImageCandidate([invalid, genericText, generic])).name,
     generic.name
   )
-  assert.deepEqual(inspected, [genericText, generic])
+  assert.deepEqual(inspected, [invalid, genericText, generic])
   assert.equal(
     (await selectImageCandidate([invalid, unspecified])).type,
+    'image/png'
+  )
+  assert.equal(
+    (await selectImageCandidate([invalid, mislabeled])).type,
     'image/png'
   )
   inspected.length = 0

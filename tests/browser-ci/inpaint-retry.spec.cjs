@@ -74,6 +74,7 @@ test('failed inpainting retries the same image and mask, then accepts a fresh st
     .click()
   await expect(page.locator('.history-scrollbar img')).toHaveCount(1)
   await expect(toolbar).toHaveJSProperty('disabled', false)
+  await expect(toolbar).toBeFocused()
   expect(
     await page.evaluate(() => {
       const [first, retried] = window.__feeds

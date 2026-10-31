@@ -158,11 +158,22 @@ export default function Editor(props: EditorProps) {
           setInpaintStage(null)
           setInpaintModelProgress(undefined)
           setIsProcessingLoading(false)
-          if (controller.signal.aborted)
-            window.requestAnimationFrame(() => {
-              if (mountedRef.current)
-                toolbarRef.current?.focus({ preventScroll: true })
-            })
+          window.requestAnimationFrame(() => {
+            const toolbar = toolbarRef.current
+            const focused = document.activeElement
+            // Wait for disabled controls and transient dialogs to settle. Keep
+            // focus the user moved elsewhere while an inference was finishing.
+            if (
+              mountedRef.current &&
+              !processingBusy.current &&
+              !document.querySelector(
+                'dialog[open], [role="dialog"][aria-modal="true"]'
+              ) &&
+              (focused === document.body ||
+                (controller.signal.aborted && toolbar?.contains(focused)))
+            )
+              toolbar?.focus({ preventScroll: true })
+          })
         }
       },
     }

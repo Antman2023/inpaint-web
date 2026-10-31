@@ -55,6 +55,25 @@ function App() {
     document.documentElement.lang = stateLanguageTag === 'zh' ? 'zh-CN' : 'en'
   }, [stateLanguageTag])
 
+  useEffect(() => {
+    if (imageImport.status !== 'loading') return
+    const cancelImport = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        document.querySelector(
+          'dialog[open], [role="dialog"][aria-modal="true"]'
+        )
+      )
+        return
+      event.preventDefault()
+      importer.cancel()
+    }
+    window.addEventListener('keydown', cancelImport)
+    return () => window.removeEventListener('keydown', cancelImport)
+  }, [imageImport.status, importer])
+
   useLayoutEffect(() => {
     if (file) return
     const pasteImage = (event: ClipboardEvent) => {

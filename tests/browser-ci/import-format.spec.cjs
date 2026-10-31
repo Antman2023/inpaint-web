@@ -154,8 +154,13 @@ test('paste accepts a PNG with generic clipboard metadata', async ({
   await expect(page.locator('#upscale-details')).toContainText('48 × 48')
 })
 
-for (const method of ['drop', 'paste']) {
-  test(`${method} skips non-image files with blank or generic metadata`, async ({
+for (const { method, type } of ['drop', 'paste'].flatMap(method =>
+  ['application/octet-stream', 'text/plain', 'image/x-png'].map(type => ({
+    method,
+    type,
+  }))
+)) {
+  test(`${method} skips non-images and recognizes PNG declared as ${type}`, async ({
     page,
     baseURL,
   }) => {
@@ -168,9 +173,8 @@ for (const method of ['drop', 'paste']) {
       localStorage.setItem('inpaint-language', 'en')
     )
     await page.goto('/')
-    const accepted = await page
-      .locator('.upload-zone')
-      .evaluate((zone, method) => {
+    const accepted = await page.locator('.upload-zone').evaluate(
+      (zone, { method, type }) => {
         const canvas = document.createElement('canvas')
         canvas.width = canvas.height = 40
         const context = canvas.getContext('2d')
@@ -195,7 +199,7 @@ for (const method of ['drop', 'paste']) {
         )
         transfer.items.add(
           new File([bytes], 'dropped.bin', {
-            type: 'application/octet-stream',
+            type,
           })
         )
         const event =
@@ -218,7 +222,9 @@ for (const method of ['drop', 'paste']) {
         }
         zone.dispatchEvent(event)
         return event.defaultPrevented
-      }, method)
+      },
+      { method, type }
+    )
     expect(accepted).toBe(true)
     await expect(page.locator('.editor-shell fieldset')).toHaveJSProperty(
       'disabled',

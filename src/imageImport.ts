@@ -12,16 +12,15 @@ export async function selectImageCandidate(
   const candidates = Array.from(files)
   const supported = candidates.find(file => IMAGE_TYPES.includes(file.type))
   if (supported) return supported
-  const generic = candidates.filter(
-    file => !file.type || file.type === 'application/octet-stream'
-  )
-  for (const file of generic) {
+  // Metadata can be incorrect as well as absent. Match the file-picker path
+  // by inspecting every remaining candidate's signature, in selection order.
+  for (const file of candidates) {
     const normalized = await normalizeImageType(file, signal)
     signal?.throwIfAborted()
     if (IMAGE_TYPES.includes(normalized.type)) return normalized
   }
   // Retain an invalid candidate so the importer can explain the rejection.
-  return generic[0] ?? candidates[0]
+  return candidates[0]
 }
 
 async function readExample(response: Response) {
